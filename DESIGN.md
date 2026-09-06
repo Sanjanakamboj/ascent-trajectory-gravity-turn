@@ -632,3 +632,277 @@ typical max-Q (e.g. ~30 kPa for Falcon 9).
    constant, or hand-calculation result.
 
 No other M1 equation, constant, or hand-calculation result was altered.
+
+---
+
+## 13. Milestone 3 — gravity-turn guidance, orbital diagnostics, and one verified trajectory
+
+> **M3 is physics/guidance verification on the unchanged vehicle, not vehicle tuning.**
+> No mass, thrust, Isp, staging, payload, or target-altitude change was made anywhere in
+> this milestone.
+
+### 13.1 M2 reconfirmation (before any M3 code was written)
+
+`scripts/m2_diagnostic_trajectory.py` was re-run unchanged and reproduced its M2
+values exactly: burn duration 158.71 s, burnout mass 90,000.0 kg, max dynamic pressure
+34.06 kPa (at ~10.5 km altitude, t ~= 54.5 s), max altitude 903.80 km, orbit not
+achieved. No discrepancy found; M3 proceeded on the unchanged M2 baseline.
+
+### 13.2 Gravity-turn guidance law (`src/ascent/controls.gravity_turn_control`)
+
+Deterministic, parameterized, and separate from `dynamics.py` (a `control(t, y, params)`
+callback, same interface as every other M2 control). Three phases, triggered by **time**
+(not altitude — see the note below):
+
+1. **Vertical rise** (`t < kick_start_time`): `chi = 90 deg` (thrust radial/vertical).
+2. **Pitch-kick** (`kick_start_time <= t < kick_start_time + kick_duration`, only if
+   `kick_duration > 0`): thrust held at a **fixed** offset from vertical,
+   `chi = 90 deg - kick_angle`, for the whole kick duration. This is a thrust-*direction*
+   change only; it does not modify the velocity state (§13.10 confirms continuity). If
+   `kick_duration == 0`, this phase has zero width and `kick_angle` is unused (check A).
+3. **Zero-angle-of-attack gravity turn** (`t >= kick_start_time + kick_duration`):
+   `chi = gamma(t)`, re-evaluated every RHS call — thrust tracks the *current* velocity
+   direction, so gamma is bent by gravity/dynamics, not prescribed directly (§13.10).
+
+Thrust cutoff at propellant depletion is enforced by `dynamics.ascent_rhs`'s existing
+mass-flow clamp, not duplicated in the guidance function.
+
+**Why time, not altitude, triggers the kick:** an altitude-triggered switch would need
+its own root-finding event mid-integration to restart the control law; a time trigger is
+simpler, fully deterministic, and sufficient for a bounded, interpretable M3 sweep. Each
+sweep row still reports the resulting altitude at which the kick occurs, so the
+altitude information is not lost, only derived rather than used as the trigger.
+
+**A real gravity-turn sensitivity, found and documented (not a bug):** because the
+correct M2 initial condition is `v0 = v_rot ~= 409 m/s` (horizontal, `gamma0 = 0`, not
+zero — DESIGN.md §12.5), and because the zero-AoA `gamma_dot` equation
+(`[T sin(alpha)/m + (v^2/r - g) cos(gamma)] / v`) has NO thrust term once `alpha = 0`,
+`gamma` decreases continuously after the kick ends whenever `v` is below local circular
+speed (true for essentially all of ascent) — the well-known mechanism that makes a
+gravity turn work. If the kick happens too early (before enough speed has built up),
+`gamma` decays through zero and the vehicle noses over into the ground **before
+burnout**. Exploration confirmed this cleanly: with this vehicle, kick-start times of 10,
+20, and 30 s crash into the ground well before the 158.7 s burn completes, **regardless
+of kick angle (5-30 deg tested) or kick duration (5 or 10 s tested)** — only
+`kick_start_time >= ~32 s` (for a 15 deg/10 s kick; the exact boundary depends on angle)
+survives to burnout. This is a genuine, physically-grounded finding about this vehicle's
+thrust-to-weight and rotation-driven initial condition, not an implementation defect,
+and it directly shaped the sweep range chosen below.
+
+### 13.3 Orbital diagnostics (`src/ascent/orbital.py`)
+
+Independently derived from `(r, v, gamma)`:
+
+```
+v_radial, v_tangential = v*sin(gamma), v*cos(gamma)
+specific_energy        = v^2/2 - mu/r
+h_ang                  = r * v_tangential                      (specific angular momentum)
+p                      = h_ang^2 / mu                          (semi-latus rectum)
+eccentricity           = sqrt(1 + 2*specific_energy*h_ang^2/mu^2)
+perigee_radius         = p / (1 + eccentricity)                (defined for any conic)
+semi_major_axis        = -mu / (2*specific_energy)             (bound orbits only, e<1)
+apogee_radius          = p / (1 - eccentricity)                (bound orbits only, e<1)
+circular_speed_here    = sqrt(mu/r)
+```
+
+Unbound (`eccentricity >= 1`, parabolic/hyperbolic) states correctly report
+`semi_major_axis = None` and `apogee_altitude = None` — no bound-orbit size is fabricated
+for them. A `perigee_radius < R_earth` sets `intersects_earth = True` (the current
+osculating conic, if propagated unpowered/undragged, would hit the ground before
+completing an orbit — i.e. this is a suborbital trajectory even if its instantaneous
+altitude is high). Tested in `tests/test_orbital.py`: circular case (energy = `-mu/2r`
+exactly, perigee = apogee = altitude), elliptical case cross-checked against vis-viva
+(`v^2 = mu(2/r - 1/a)`), hyperbolic case (no apogee, e >= 1), a suborbital case
+correctly flagged `intersects_earth = True`, and an explicit "high apogee alone is not
+orbit" case.
+
+### 13.4 Orbit-achievement criterion (explicit, before the sweep)
+
+```
+is_circular_orbit_achieved(state, target_altitude, altitude_tolerance=10 km) :=
+    state.is_bound
+    AND NOT state.intersects_earth
+    AND |perigee_altitude - target_altitude| <= altitude_tolerance
+    AND |apogee_altitude  - target_altitude| <= altitude_tolerance
+```
+
+This requires a near-circular orbit **at** the target altitude — both perigee and
+apogee within 10 km of 400 km — and explicitly does **not** accept "max altitude
+> 400 km" as sufficient (a lofted suborbital trajectory can have an apogee far above
+400 km while its perigee is deep inside the Earth; `tests/test_orbital.py::
+test_max_altitude_alone_does_not_imply_orbit_achieved` checks exactly this).
+
+### 13.5 Guidance parameter sweep (`scripts/m3_gravity_turn_sweep.py`)
+
+Bounded 2D grid, **5 x 5 = 25 cases**, unchanged vehicle:
+
+| Parameter | Values swept |
+|---|---|
+| Pitch-kick start time | 20, 30, 40, 50, 60 s |
+| Pitch-kick angle | 5, 10, 15, 20, 25 deg |
+| Pitch-kick duration | fixed at 10 s for every case (not swept) |
+
+**Objective metric:** maximize burnout specific orbital energy
+(`epsilon = v^2/2 - mu/r` at the propellant-depletion state) among cases that survive
+powered flight to burnout. This is transparent and single-valued; it does not attempt to
+force orbital insertion.
+
+**Results (full CSV: [`scripts/m3_sweep_results.csv`](scripts/m3_sweep_results.csv)):**
+17/25 cases reached burnout (8 crashed into the ground before burnout — all at
+`kick_start_time = 20 s`, plus 3 of 5 at `kick_start_time = 30 s`, consistent with
+§13.2's finding). **0/25 cases achieved the 400 km circular orbit criterion (§13.4).**
+This is reported honestly, not hidden — it is the expected result given M1 §7.4's
+already-documented Δv shortfall.
+
+**Selected case (max burnout specific energy among survivors):**
+`kick_start_time = 40 s`, `kick_angle = 25 deg`, `kick_duration = 10 s`
+(`specific_energy = -5.217e7 J/kg`). Energy at `kick_start_time = 40 s` is fairly flat
+across kick angle (`-5.218e7` to `-5.224e7 J/kg`, a ~0.2% spread) — the timing of the
+kick matters far more than its magnitude for this objective, another genuine,
+interpretable finding from the sweep, not a cherry-picked result.
+
+### 13.6 Selected trajectory (`scripts/m3_trajectory.py`)
+
+Figures: [`figures/m3_gravity_turn_trajectory.png`](figures/m3_gravity_turn_trajectory.png)
+(altitude, speed, flight-path angle, dynamic pressure, mass vs. time, with pitch-kick,
+burnout, ascent max-Q, and apogee marked) and
+[`figures/m3_velocity_components.png`](figures/m3_velocity_components.png) (radial vs.
+tangential velocity; altitude vs. downrange angle). Both titled
+*"M3 gravity-turn trajectory — unchanged M1/M2 verification vehicle"* and explicitly
+labeled diagnostic/supporting, not a validated flight result.
+
+**Burnout state:** t = 158.71 s, altitude = 42.19 km, speed = 4451.3 m/s,
+gamma = 1.43 deg, specific orbital energy = -5.218e7 J/kg, eccentricity = 0.681.
+**Perigee altitude = -5160 km (`intersects_earth = True`), apogee altitude = 43.1 km.**
+**400 km circular-orbit criterion: NOT achieved.**
+
+The vehicle follows this trajectory to apogee at t ~= 175.7 s (h ~= 43.1 km, matching
+the analytic burnout-state apogee to within 0.03 km — see §13.9 check G/apogee
+cross-check) and then, because its perigee is deep inside the Earth, re-enters and
+impacts the ground at t ~= 297.2 s.
+
+**Max dynamic pressure during ascent (t <= burnout) = 70.1 kPa**, occurring essentially
+at burnout itself (this trajectory's altitude stays low enough, 42 km, that dynamic
+pressure is still rising when propellant runs out, rather than peaking mid-flight the
+way the M2 diagnostic's steeper trajectory did — a genuine feature of this particular
+low-loft guidance solution, not an error). **Max dynamic pressure overall = 1803 kPa**,
+reached during the high-speed terminal re-entry dive (t ~= 291 s) — a real but distinct
+phenomenon from ascent aerodynamic loads, and is called out separately on the figure so
+it is not mistaken for ascent max-Q.
+
+### 13.7 Comparison against the M2 prescribed-control diagnostic
+
+| Quantity | M2 diagnostic (vertical + one fixed 88 deg pitch) | M3 selected gravity turn |
+|---|---|---|
+| Burnout time | 158.7 s | 158.7 s (unchanged vehicle/burn) |
+| Burnout altitude | (not applicable; M2 tracked full flight) | 42.2 km |
+| Burnout speed | 3543.6 m/s | 4451.3 m/s |
+| Burnout gamma | ~76 deg (steep) | 1.4 deg (nearly horizontal) |
+| Max altitude reached | 903.8 km | 43.1 km (apogee) |
+| Max-Q (ascent) | 34.1 kPa @ ~10.5 km | 70.1 kPa @ ~burnout (42 km) |
+| Orbit achieved | No | No |
+
+The M3 guidance law achieves a much higher burnout speed and a much shallower burnout
+flight-path angle than M2's fixed near-vertical pitch — i.e. it IS a more efficient use
+of the same propellant toward orbital insertion (higher specific energy) — but trades
+away altitude entirely (42 km vs. 904 km apogee) to do it, and still falls well short of
+orbital energy. Both are honest, unglossed results for this vehicle.
+
+### 13.8 Event handling refinement
+
+| Event | Direction | Terminal? | M3 status |
+|---|---|---|---|
+| Propellant depletion | -1 | configurable (`terminal_depletion`, default False, per M2) | Verified: fires within 0.1% of analytic `t_burn`; mass never drops more than ~0.1 kg below `m_min` (~2e-7 relative) across a full gravity-turn run |
+| Ground impact | -1 | Yes (always) | Verified directionally correct (`r` strictly decreasing into the event) on both a simple ballistic case and the gravity-turn sweep's crash cases |
+| **Apogee (new)** | -1 (`r_dot` crossing + to -) | No (default; can be set terminal) | Verified: fires during coast, and the apogee time matches the sampled-trajectory altitude maximum to within 2 s |
+| Target-altitude crossing | 0 | No (default) | Explicitly verified NOT to imply orbit achievement (separate API, `orbital.is_circular_orbit_achieved`) |
+| Atmosphere-exit (H_MAX, diagnostic) | 0 | No (default) | Available (`make_atmosphere_exit_event`); a thin wrapper over the altitude-crossing event at the atmosphere model's cutoff |
+
+"Liftoff / positive vertical motion" was considered and deliberately **not** added as a
+separate event: this model has no hold-down phase — thrust is on and the state already
+has nonzero (co-rotating) velocity from `t = 0` — so there is no ambiguous liftoff
+instant for an event to detect.
+
+### 13.9 Independent verification results (checks A-H, DESIGN.md M3 objective)
+
+| Check | Result |
+|---|---|
+| A. Zero pitch-kick limit | `kick_duration=0`: kick phase has zero width, `chi=gamma` immediately after `kick_start_time` regardless of `kick_angle`; `kick_angle=0`: kicked angle equals vertical exactly. Both verified directly on the control function. |
+| B. Small-kick continuity | 5 angles (1-3 deg) at a fixed kick timing: no burnout-energy jump more than 5x any neighboring step — smooth response, away from the crash/survive boundary |
+| C. Zero-AoA condition | After the kick phase, `chi == gamma` exactly (`abs=1e-12`) at an arbitrary sampled state |
+| D. Coast conservation | Burnout state propagated with `Cd=0`: specific energy and angular momentum constant to `< 1e-8` relative over a 600 s coast |
+| E. Event consistency | Depletion event time matches analytic `t_burn` to `rel=1e-3`; burnout mass matches `m_dry+m_payload` to `abs=1e-2` kg |
+| F. State reconstruction | `(v, gamma) -> (v_radial, v_tangential) -> (v, gamma)` round-trips to `rel=1e-12` |
+| G. Orbital-element consistency | `-mu/(2a)` reconstructed from the burnout state's own semi-major axis matches its `specific_energy` to `rel=1e-6`; independently, `sqrt(mu*a*(1-e^2))` reconstructs `specific_angular_momentum` to `rel=1e-6` in `test_orbital.py` |
+| H. Guidance repeatability | Identical `(t, r, v, gamma, m)` arrays (exact equality) across two runs of the same parameters |
+
+Plus a dedicated velocity-continuity sanity check (§13.10) and the full M2 test suite
+(37 tests, unchanged) still passing. **60 tests total, all passing under
+`pytest -W error`.**
+
+### 13.10 Physical sanity checks (M2 objective §10)
+
+- **No discontinuous velocity change at the pitch-kick.** The kick changes only the
+  commanded thrust *direction*; it never modifies the state vector `y`. Verified with a
+  tight (±0.02 s) window around each phase boundary: `|Δv| < 2 m/s` (a generous bound —
+  a genuine discontinuity would show as O(10-100) m/s given this vehicle's speeds).
+  (An earlier draft of this test used a single non-uniform `t_eval` array whose middle
+  gap spanned the entire kick duration — a ~4.9 s window, not ~0.1 s — and flagged a
+  smooth ~11 m/s change as if it were a discontinuity; that was a test-construction bug,
+  not a dynamics bug, and was corrected to bracket each boundary tightly and
+  independently.)
+- **Drag still uses atmosphere-relative velocity**, unchanged from M2 (`dynamics.
+  relative_speed`, not touched in M3).
+- **Atmosphere still rotates consistently with M2** (`atmosphere_corotation_speed`,
+  unchanged).
+- **Thrust stops exactly at propellant depletion** — enforced by the unchanged M2 mass-
+  flow clamp; §13.9 check E confirms the cutoff mass and timing.
+- **Coast phase consumes no mass** — `coast_control` commands `T=0`, and
+  `clamped_mass_flow_rate` returns exactly 0 whenever thrust is 0 (unchanged M2 logic,
+  re-verified in `test_events_m3.py`).
+- **The flight path is bent by gravity, not prescribed.** `gamma(t)` is never set
+  directly by the guidance law; only the thrust-direction angle `chi` is prescribed, and
+  `gamma` is always obtained by integrating the dynamics ODE (§13.2).
+
+### 13.11 Integrator convergence (selected trajectory, powered phase)
+
+Three settings, `(max_step, rtol, atol)`:
+
+| Setting | Burnout altitude [km] | Burnout speed [m/s] | Burnout gamma [deg] | Max-Q [kPa] | Apogee altitude [km] |
+|---|---|---|---|---|---|
+| `(2.0, 1e-6, 1e-6)` | 42.127 | 4452.115 | 1.4466 | 70.413 | 43.086 |
+| `(0.5, 1e-9, 1e-9)` | 42.158 | 4452.072 | 1.4552 | 70.153 | 43.129 |
+| `(0.1, 1e-12, 1e-12)` | 42.158 | 4452.072 | 1.4552 | 70.153 | 43.129 |
+
+Burnout time is identical (event-detected, `t = 158.71288815789472 s`) at all three
+settings, as expected. The tightest two settings agree to 5-6 significant figures on
+every reported quantity (altitude within 0.5 m, speed within 0.001 m/s, gamma within
+1e-5 deg, max-Q within 0.0005 kPa, apogee within 0.5 m) — convergence is not claimed
+merely because `solve_ivp` reported success.
+
+### 13.12 Was 400 km circular orbit achieved?
+
+**No**, for any of the 25 swept cases, including the selected (best-by-objective) one.
+This is the expected, honest outcome given M1 §7.4's already-documented ideal-Δv
+shortfall (~5.05 km/s available vs. a rough ~8.9-9.5 km/s LEO budget), now confirmed
+against an actual integrated, verified gravity-turn guidance law rather than a rough
+scalar estimate. No vehicle parameter was changed to try to close this gap — that
+remains explicitly out of scope until a later milestone (M1 §7.4, restated in the M3
+task instructions).
+
+### 13.13 M3 limitations
+
+- The pitch-kick trigger is time-based, not altitude-based (§13.2); an altitude-based
+  trigger would need its own guidance-restart event and was judged unnecessary
+  complexity for a bounded M3 sweep.
+- The guidance law's "kicked" angle is held fixed (not linearly ramped) during the kick
+  phase — a simpler, equally defensible choice, documented in `controls.py`.
+- The sweep is a 2D grid (kick timing x kick angle) with kick duration fixed at 10 s;
+  duration itself was not swept, per the instruction to keep the search small.
+- The orbit-achievement altitude tolerance (10 km) is a documented, somewhat arbitrary
+  diagnostic choice, not derived from a mission requirement.
+- As in M2, drag's magnitude uses atmosphere-relative speed but its direction is taken
+  anti-parallel to the inertial velocity (not to the relative-velocity vector) in the
+  `v_dot`/`gamma_dot` equations — unchanged from M2, not revisited in M3.
+- No structural/thermal load limit is checked against the max-Q or terminal re-entry
+  dynamic-pressure values reported in §13.6 — they are reported as diagnostics only.

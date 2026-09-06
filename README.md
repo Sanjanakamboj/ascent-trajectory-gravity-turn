@@ -17,8 +17,10 @@ approved.
       verification.** See [`DESIGN.md` §12](DESIGN.md#12-milestone-2--physics-implementation-and-verification).
       Physics verification only, no guidance law; baseline vehicle does **not** reach
       400 km circular LEO with a fixed pitch profile (expected — see §12.9).
-- [ ] M3 — Gravity-turn guidance, full trajectory profile, event handling, numerical
-      convergence.
+- [x] **M3 — Gravity-turn guidance, full trajectory profile, event handling, numerical
+      convergence.** See [`DESIGN.md` §13](DESIGN.md#13-milestone-3--gravity-turn-guidance-orbital-diagnostics-and-one-verified-trajectory).
+      Verified guidance law + 25-case parameter sweep on the unchanged vehicle; 0/25
+      cases achieve 400 km circular orbit (expected, given the M1 §7.4 Δv deficit).
 - [ ] M4 — Payload-to-orbit solve at the baseline inclination.
 - [ ] M5 — Inclination sweep, launch-azimuth/Earth-rotation coupling, payload-vs-
       inclination curve.
@@ -49,14 +51,23 @@ scripts/        m2_diagnostic_trajectory.py — diagnostic-only trajectory + fig
 figures/        m2_diagnostic_trajectory.png (diagnostic/supporting, not validated)
 ```
 
-### M2 diagnostic trajectory
+### M3 gravity-turn trajectory (current primary trajectory)
+
+![M3 gravity-turn trajectory](figures/m3_gravity_turn_trajectory.png)
+
+Verified gravity-turn guidance law (vertical rise -> pitch-kick -> zero-AoA turn) on the
+unchanged M1/M2 baseline vehicle, selected from a 25-case parameter sweep by maximum
+burnout specific orbital energy — see `DESIGN.md` §13. **Diagnostic/supporting only,
+not a validated result.** No case in the sweep reaches 400 km circular orbit, which is
+the expected outcome given the Δv deficit documented in `DESIGN.md` §7.4.
+
+### M2 diagnostic trajectory (earlier, prescribed-control-only baseline)
 
 ![M2 diagnostic trajectory](figures/m2_diagnostic_trajectory.png)
 
-Prescribed (non-guided) pitch profile on the unchanged M1 baseline vehicle — see
-`DESIGN.md` §12.9. **Diagnostic/supporting only, not a validated result.** The vehicle
-does not reach 400 km circular orbit, which is the expected outcome given the Δv
-deficit already documented in `DESIGN.md` §7.4.
+Fixed near-vertical pitch profile (no guidance law) on the unchanged M1 baseline
+vehicle — see `DESIGN.md` §12.9. Diagnostic/supporting only, kept for comparison
+against the M3 result (`DESIGN.md` §13.7).
 
 ## Development
 

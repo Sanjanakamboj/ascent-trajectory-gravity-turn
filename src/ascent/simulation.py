@@ -16,6 +16,7 @@ from .dynamics import (
     ControlFn,
     ascent_rhs,
     make_altitude_crossing_event,
+    make_apogee_event,
     make_ground_impact_event,
     make_propellant_depletion_event,
 )
@@ -38,19 +39,28 @@ class AscentResult:
 def run_ascent(y0: np.ndarray, t_span, params: AscentParams, control: ControlFn,
                 max_step: float = 0.5, rtol: float = 1e-9, atol: float = 1e-9,
                 target_altitude: Optional[float] = None,
+                terminal_depletion: bool = False, include_apogee_event: bool = True,
                 dense_output: bool = False, t_eval: Optional[np.ndarray] = None):
     """Integrate the ascent ODE from y0 over t_span with the given control law.
 
-    Events (DESIGN.md M2 "Events and termination"):
-      - propellant depletion (non-terminal; logged for diagnostics)
+    Events (DESIGN.md M2/M3 "Events and termination"), in fixed order
+    [depletion, ground impact, apogee?, target-altitude?]:
+      - propellant depletion (non-terminal by default; pass ``terminal_depletion=True``
+        to stop exactly at burnout, e.g. for an efficient parameter sweep)
       - ground impact, h = 0 while descending (terminal)
+      - apogee, r_dot crosses zero from + to - (non-terminal; included by default,
+        disable with ``include_apogee_event=False``)
       - optional target-altitude crossing (non-terminal diagnostic), if
-        ``target_altitude`` is given
+        ``target_altitude`` is given -- NOT the same as orbit achievement, see
+        ``orbital.is_circular_orbit_achieved``
     """
     events = [
         make_propellant_depletion_event(params),
         make_ground_impact_event(params),
     ]
+    events[0].terminal = terminal_depletion
+    if include_apogee_event:
+        events.append(make_apogee_event())
     if target_altitude is not None:
         events.append(make_altitude_crossing_event(target_altitude, params))
 

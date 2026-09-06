@@ -201,7 +201,13 @@ def make_ground_impact_event(params: AscentParams):
 
 def make_altitude_crossing_event(target_altitude: float, params: AscentParams,
                                   terminal: bool = False):
-    """Diagnostic (non-terminal by default) event: altitude crosses a target value."""
+    """Diagnostic (non-terminal by default) event: altitude crosses a target value.
+
+    NOTE: crossing a target altitude is NOT the same as achieving orbit there -- see
+    ``orbital.is_circular_orbit_achieved``, which additionally requires the perigee to
+    also be near the target (ruling out a suborbital trajectory that merely passes
+    through the target altitude on its way up or down).
+    """
 
     def event(t, y):
         return (y[0] - params.r_earth) - target_altitude
@@ -209,3 +215,31 @@ def make_altitude_crossing_event(target_altitude: float, params: AscentParams,
     event.terminal = terminal
     event.direction = 0
     return event
+
+
+def make_apogee_event(terminal: bool = False):
+    """Apogee event: radial velocity (r_dot = v*sin(gamma)) crosses zero from + to -.
+
+    Fires at a local maximum of altitude -- during coast this is the true orbital
+    apogee; it can in principle also fire during powered flight if the guidance law
+    ever drives r_dot through zero while thrusting, which is a legitimate use of the
+    same mathematical condition (a momentary altitude peak), not a bug.
+    """
+
+    def event(t, y):
+        r, theta, v, gamma, m = y
+        return v * np.sin(gamma)
+
+    event.terminal = terminal
+    event.direction = -1  # crossing from positive (climbing) to negative (descending)
+    return event
+
+
+def make_atmosphere_exit_event(params: AscentParams, terminal: bool = False):
+    """Optional diagnostic event: altitude crosses the atmosphere model's H_MAX cutoff.
+
+    Purely a diagnostic marker of when this simplified atmosphere model's density goes
+    to exact zero (DESIGN.md atmosphere.py docstring) -- not a physical "edge of space"
+    claim.
+    """
+    return make_altitude_crossing_event(atmo.H_MAX, params, terminal=terminal)
