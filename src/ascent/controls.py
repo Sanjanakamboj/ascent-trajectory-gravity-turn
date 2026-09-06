@@ -103,6 +103,27 @@ def gravity_turn_control(thrust: float, kick_start_time: float, kick_angle_rad: 
     return control
 
 
+def with_cutoff(control_fn, cutoff_time: float):
+    """M4: wrap a control law with a guided/commanded engine cutoff at ``cutoff_time``.
+
+    Real launch vehicles very commonly cut the main engine off once the desired
+    insertion state is reached, rather than always burning to full propellant
+    depletion (DESIGN.md M4 S4 "identify a suitable cutoff/insertion point"). This is
+    an explicit, separate guidance decision from ``gravity_turn_control``'s pitch
+    profile: for ``t < cutoff_time`` the wrapped control behaves exactly as
+    ``control_fn`` would; for ``t >= cutoff_time`` thrust is forced to zero
+    regardless of remaining propellant (the vehicle carries any unused propellant
+    onward as ordinary dead mass -- it is not jettisoned or otherwise idealized away).
+    """
+
+    def control(t, y, params):
+        if t >= cutoff_time:
+            return 0.0, y[3]
+        return control_fn(t, y, params)
+
+    return control
+
+
 def vertical_rise_then_pitch_kick_control(thrust: float, kick_start_time: float,
                                            kick_angle_rad: float, chi_after_kick: float):
     """Diagnostic-only M1-style demonstration: vertical rise, then a fixed pitch-kick.

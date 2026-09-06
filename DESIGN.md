@@ -906,3 +906,312 @@ task instructions).
   `v_dot`/`gamma_dot` equations — unchanged from M2, not revisited in M3.
 - No structural/thermal load limit is checked against the max-Q or terminal re-entry
   dynamic-pressure values reported in §13.6 — they are reported as diagnostics only.
+
+---
+
+## 14. Milestone 4 — orbit-capable study vehicle and payload-to-orbit solve
+
+> **M4 asks a narrower question than "reach orbit": at 400 km / 28.5°, what
+> vehicle/payload combinations actually achieve the defined insertion condition?**
+> The M1–M3 verification vehicle is retained, unmodified, as a documented FAILURE case
+> under the M4 criterion (§14.10 check A) — it is never silently replaced. A new,
+> explicitly separate **M4 orbit-capable study vehicle** is defined instead (§14.3).
+
+### 14.1 M3 reconfirmation (before any M4 code was written)
+
+The M3-selected case was independently reproduced exactly: kick_start=40 s,
+kick_angle=25°, kick_duration=10 s → burnout t=158.71 s, altitude=42.19 km,
+speed=4451.3 m/s, gamma=1.43°, specific energy=-5.218e7 J/kg, e=0.6811, perigee
+intersects Earth, 400 km circular orbit = **FAIL**. This remains the authoritative M3
+result and is not reinterpreted here.
+
+### 14.2 M4 orbit-insertion criterion (defined before any vehicle/guidance search)
+
+DESIGN.md M3 §13.4 already defined a strict "raw ascent alone must already be
+near-circular" criterion. M4 instead evaluates a standard **ascent-to-apogee +
+idealized apogee-circularization** mission profile (`orbital.evaluate_orbit_insertion`,
+`orbital.circularization_delta_v_at_apogee`): propagate the powered ascent, identify a
+cutoff/insertion instant, and compute the impulsive tangential delta-v needed to
+circularize at that instant's (post-atmosphere) apogee. **The circularization burn is
+explicitly an idealized, unconstrained-thrust insertion-stage impulse — it is never
+subtracted from the M4 vehicle's own propellant/mass budget** (finite-thrust
+upper-stage optimization is out of M4 scope, per the task's explicit scope boundary);
+it is reported as a diagnostic quantity.
+
+**PASS requires ALL of:**
+1. the post-cutoff osculating orbit is bound (`is_bound`),
+2. it does not itself intersect the Earth as a standalone ellipse (`reaches_bound_orbit`
+   — a sanity floor, not the headline criterion),
+3. the **natural apogee altitude** (before circularizing) is within **15 km** of
+   400 km — an idealized circularization burn cannot move WHERE the apogee is, only
+   the orbit's shape at that altitude, and
+4. the idealized circularization delta-v needed there is **≤ 1500 m/s** — a documented,
+   explicit engineering judgment call (not a silently smuggled-in constraint) bounding
+   the insertion burn to a plausible kick/insertion-stage impulse, not a second full
+   ascent burn.
+
+This explicitly distinguishes **"orbit-capable / reaches a bound LEO"**
+(`reaches_bound_orbit` alone) from **"meets the 400 km insertion criterion"**
+(`meets_insertion_criterion`, all four conditions) — `tests/test_m4_insertion.py`
+includes a dedicated case with high apogee and low (in-cap) circularization delta-v
+that nonetheless fails because the natural apogee is far from the target, so "reaches
+orbit" is never conflated with "meets this mission's target."
+
+**A genuine discrepancy found and corrected during M4 (not an M1–M3 error):** the
+guidance search initially evaluated candidate cutoffs using the **idealized**
+(instantaneous, drag-free) osculating apogee at the cutoff sample. Because this
+vehicle's best insertion window occurs at a fairly low cutoff altitude (order
+70–110 km) — still within the (small but nonzero) modeled atmosphere below
+`atmosphere.H_MAX` (100 km) — a real drag-included coast from there up through 100 km
+loses measurable additional energy that the idealized instantaneous estimate misses
+entirely. On the reference-payload case this was checked directly: the idealized
+cutoff-instant apogee was 386 km, but the actual drag-included coast up to 100 km
+altitude settled to 293 km — large enough to invalidate the naive criterion, not a
+rounding effect. **Fix:** `insertion_search.find_drag_consistent_cutoff` evaluates every
+candidate cutoff by actually coasting (thrust off, drag on) from that instant up to
+100 km altitude before computing orbital elements, and this is the standard used
+throughout M4 (guidance search, payload sweep, final trajectory) — the idealized
+`orbital.scan_best_insertion_cutoff` from M3 is retained only as a cheap first-pass
+bracketing step, never as the final answer.
+
+### 14.3 M4 orbit-capable study vehicle (`constants.m4_vehicle`, `M4_DESIGN`)
+
+Explicitly separate from `BASELINE_VEHICLE` (M1–M3), which is **never modified**.
+Smallest reasonable change set, changing only what M1 §7.4 already identified as the
+blocking constraint (propellant mass fraction and Isp); aerodynamics, launch site,
+target altitude, and the dynamics/atmosphere framework are all unchanged:
+
+| Quantity | BASELINE_VEHICLE (M1–M3) | M4 study vehicle | Changed? |
+|---|---|---|---|
+| Dry mass | 80,000 kg | 50,000 kg | **yes** |
+| Propellant mass | 410,000 kg | 440,000 kg | **yes** |
+| Isp | 300 s | 450 s | **yes** |
+| Thrust | 7.6 MN | 7.6 MN | no |
+| Reference area | 10.75 m² | 10.75 m² | no |
+| Drag coefficient | 0.3 | 0.3 | no |
+| Payload (reference) | 10,000 kg | 10,000 kg (swept in M4) | reference unchanged |
+
+**Analytical justification (before any propagation), reference payload = 10,000 kg:**
+
+| Quantity | Value |
+|---|---|
+| m0 | 500,000 kg |
+| mf (dry+payload) | 60,000 kg |
+| Mass ratio | 8.333 |
+| Exhaust velocity (ve = Isp·g0) | 4413.0 m/s |
+| **Ideal Δv (Tsiolkovsky)** | **9356.7 m/s** |
+| Thrust-to-weight at liftoff | 1.550 (unchanged from M1 — same thrust, same m0) |
+| Mass flow rate | 1722.19 kg/s |
+| Full-depletion burn duration | 255.49 s |
+
+An Isp of 450 s (vs. M1's 300 s) is representative of a higher-performance (LH2/LOX-
+class) propulsion assumption — it is the dominant, explicitly justified change, because
+at Isp=300 s no physically plausible structural mass fraction closes the LEO delta-v
+budget (M1 §7.4: a mass ratio of ~20+ would be required). The propellant fraction here
+implies a ~10.2% dry-mass-fraction-of-stack (50,000 / (50,000+440,000)), aggressive but
+comparable to serious SSTO study-vehicle proposals (e.g. VentureStar/X-33-class
+targets) — **not** an existing operational vehicle, hence "study vehicle" throughout.
+No staging is used (single-stage, per the task's preference to isolate payload
+capability cleanly).
+
+### 14.4 Guidance retuning (`scripts/m4_guidance_search.py`)
+
+Same three-phase `controls.gravity_turn_control` law as M3 (vertical rise → fixed-angle
+pitch-kick → zero-AoA gravity turn), retuned for the new vehicle via a structured
+coarse-to-fine search:
+
+- **Coarse**: kick_start ∈ {35,45,55} s × kick_angle ∈ {15,20,25,30}° × kick_duration ∈
+  {15,20,25} s = 36 combinations (a wider 180-combination exploratory sweep was run
+  during development and located the same optimum; the committed script uses this
+  smaller, still-representative grid so it re-runs in a practical amount of time).
+- **Fine**: a local refinement grid around the best coarse point.
+- For every combination, the engine-cutoff time is found via
+  `find_drag_consistent_cutoff` (§14.2), NOT full propellant depletion — DESIGN.md
+  §14.5 explains why an early, commanded cutoff is used.
+- **Objective**: minimize the idealized circularization delta-v (§14.2) among
+  combinations that meet the full insertion criterion.
+
+Running the committed search: only 1/36 coarse combinations meet the insertion
+criterion at all — kick_start=45 s, kick_angle=20°, kick_duration=20 s (circ_dv=96.5
+m/s, apogee=400.03 km) — underscoring the same guidance sensitivity already
+documented in M3 §13.2 and rediscovered here (§14.2). The fine local refinement around
+it finds 13 passing neighbors, including an essentially tied alternative (kick_start=47
+s, kick_angle=17°, kick_duration=16 s; circ_dv=96.5 m/s, apogee=400.06 km) — statistically
+indistinguishable from the coarse optimum.
+
+**Selected guidance**: kick_start = 45 s, kick_angle = 20°, kick_duration = 20 s (the
+coarse-stage optimum, confirmed not meaningfully improved upon by the fine stage).
+At the reference payload this gives cutoff_time ≈ 250.87 s, natural (drag-consistent,
+post-100 km) apogee ≈ 400.03 km, and circularization Δv ≈ 96.5 m/s.
+
+### 14.5 Commanded engine cutoff (not full propellant depletion)
+
+Unlike M1–M3, the M4 insertion is achieved with a **commanded/guided engine cutoff**
+before full propellant depletion (`controls.with_cutoff`, and directly via
+`find_drag_consistent_cutoff`'s identified cutoff time) — this is standard real-vehicle
+practice ("identify a suitable cutoff/insertion point" per the task instructions), and
+was found to be necessary here: the vehicle's very high thrust-to-weight makes the
+zero-AoA gravity-turn phase extremely sensitive to timing (a well-known consequence of
+the `gamma_dot` equation losing its thrust term once alpha=0 — DESIGN.md M3 §13.2's
+finding, which recurs here). At the reference payload, cutoff occurs at t≈250.87 s
+against a full-depletion time of 255.49 s, leaving ≈8,800 kg of unburned propellant
+onboard as ordinary dead mass (not jettisoned, not idealized away — DESIGN.md §14.6).
+
+An earlier design iteration attempted to instead **resize propellant** so that full
+depletion coincided with the insertion window, removing the need for a cutoff layer.
+This was tried and rejected: reducing propellant mass changes the vehicle's ENTIRE
+mass-vs-time history (a lighter vehicle accelerates faster from t=0), so the state at
+the same nominal burn time is a materially different (much more energetic) trajectory
+than the original heavier vehicle's state at that same instant — it does not simply
+"stop the original trajectory earlier." Only an explicit, independent commanded-cutoff
+control (leaving the mass history otherwise unchanged) reproduces the state actually
+found by the guidance search. This is documented rather than silently discovered and
+discarded.
+
+### 14.6 Mass bookkeeping (DESIGN.md M4 S6)
+
+`m0 = m_dry + m_propellant + payload`; `m_propellant` and `m_dry` are FIXED
+(`M4VehicleDesign`) across the payload sweep — **only `payload` (and therefore `m0`)
+varies**. `m_min = m_dry + payload` (propellant fully depleted with payload still
+attached). Because M4 uses a commanded cutoff before full depletion, the mass AT
+CUTOFF is `m0 - mdot·t_cutoff > m_min` (some propellant remains unburned) — this is
+distinct from, and does not weaken, the underlying floor: `tests/test_dynamics.py`
+(M2, unchanged) and `tests/test_m4_vehicle.py` both confirm mass can never be driven
+below `m_min` regardless of commanded thrust, and if a case is propagated to full
+depletion (no cutoff), burnout mass equals `m_min` exactly (M1–M3 behavior, unchanged).
+`tests/test_m4_vehicle.py` specifically targets the bugs named in the task instructions:
+payload treated as propellant, m0 held fixed while payload varies, mass allowed below
+`m_min`, and double-counted payload — all four are explicitly tested and pass.
+
+### 14.7 Payload-to-orbit solve (`scripts/m4_payload_sweep.py`)
+
+Method: (1) coarse upward sweep from the reference payload (10,000 kg, confirmed PASS)
+in 1000 kg steps until a FAIL is found, bracketing the boundary; (2) bisection of that
+bracket directly on the PASS/FAIL boolean, to a 1 kg tolerance — plain bisection was
+used rather than forcing a smooth-function root-finder (e.g. Brent) onto what turned
+out to be a near-step transition (§14.9); (3) the required case set (below) plus extra
+low-payload points investigating a genuine non-monotonicity (§14.9 check B). The
+bracket search fails loudly (raises) if the reference payload itself fails, or if no
+failing payload is found by 100,000 kg — it does not silently guess a bracket.
+
+**Headline figure**: [`figures/m4_payload_capability.png`](figures/m4_payload_capability.png)
+(`scripts/m4_payload_figure.py`) — payload vs. apogee altitude (PASS/FAIL, target band,
+max-payload line) and payload vs. idealized circularization Δv, from a denser
+(non-required-case) sweep across the transition region.
+
+**Result: maximum payload = 10,333 kg** (10,334 kg confirmed failing; the transition is
+sharp — see §14.9).
+
+### 14.8 Required payload cases
+
+Full CSV: [`scripts/m4_payload_sweep_results.csv`](scripts/m4_payload_sweep_results.csv).
+
+| Payload [kg] | m0 [kg] | Burnout alt [km] | Burnout v [m/s] | Burnout γ [deg] | Max-Q [kPa] | Apogee [km] | Circ. Δv [m/s] | Orbit achieved |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 490,000 | 108.9 | 9194.8 | 3.63 | 29.4 | — | — | **FAIL** (closest apogee miss 0.015 km — extremely close, but fails other conditions, §14.9) |
+| 5,000 | 495,000 | 90.3 | 8861.1 | 1.88 | 28.8 | — | — | **FAIL** (closest miss 0.033 km) |
+| 7,500 | 497,500 | 80.4 | 7946.1 | 0.96 | 28.5 | 400.01 | 104.8 | **PASS** |
+| **10,000 (reference)** | 500,000 | 72.4 | 8010.5 | 0.114 | 28.2 | 400.03 | 96.5 | **PASS** |
+| 9,333 (near-boundary) | 499,333 | 74.6 | 7983.1 | 0.339 | 28.3 | 399.95 | 96.8 | **PASS** |
+| **10,333 (maximum)** | 500,333 | 71.3 | 8031.1 | 0.0017 | 28.2 | 399.89 | 96.8 | **PASS** |
+| 10,334 (just failing) | 500,334 | 71.3 | 8538.4 | 0.032 | 28.2 | closest miss ≈393 km | — | **FAIL** |
+| 10,833 (clearly failing) | 500,833 | 69.6 | 8509.1 | -0.139 | 28.1 | closest miss ≈388 km | — | **FAIL** |
+
+(Exact floating-point values are in `scripts/m4_payload_sweep_results.csv`. The two
+"failing" rows' burnout state is reported at full propellant depletion, since no
+passing engine-cutoff instant was found for those payloads.)
+
+### 14.9 Numerical verification (checks A–J)
+
+| Check | Result |
+|---|---|
+| A. Original vehicle remains a failure | `BASELINE_VEHICLE` re-run through `find_drag_consistent_cutoff` with a representative M3-style guidance attempt: **no passing cutoff found** — consistent with M1 §7.4 and M3 §13.12 |
+| B. Payload monotonicity | **Investigated, real, explained non-monotonicity found**: 0 kg and 5,000 kg payload FAIL — remarkably, within 15-33 METERS of the target apogee — while 7,500-10,333 kg PASS. Root cause (not a bug): the fixed guidance profile was tuned for the 10,000 kg reference; a LIGHTER vehicle has more excess energy and, at the same kick timing, "overshoots" past the narrow viable insertion window before its perigee clears the ground (traced directly: at payload=0, even climbing states (γ>0) extremely near the target apogee still have `intersects_earth=True`). This is a property of using one FIXED guidance profile across the whole payload range, not a defect in the dynamics/orbital-element code, and it underscores just how narrow this vehicle's viable insertion window is. It does not affect the maximum-payload result, which sits in the monotonically-behaved region (7,500 kg → 10,333 kg PASS → 10,334 kg FAIL) |
+| C. Payload-boundary bracketing | 10,333 kg confirmed PASS and 10,334 kg confirmed FAIL by direct construction (`assert`s in `m4_payload_sweep.py::main` and `tests/test_m4_payload_boundary.py`) |
+| D. Mass bookkeeping | `tests/test_m4_vehicle.py`: m0 varies correctly with payload (dry/propellant fixed), `m_min = m_dry+payload`, payload never double-counted or treated as propellant |
+| E. Tsiolkovsky consistency | `tests/test_m4_loss_budget.py::test_zero_drag_zero_alpha_case_matches_pure_tsiolkovsky` — achieved Δv matches `Isp·g0·ln(m0/mf)` to `rel=1e-6` for the M4 vehicle at the reference payload, mu=0/Cd=0/alpha=0 reduction |
+| F. Energy/orbital-element consistency | `orbital.py`'s existing self-consistency checks (M3, unchanged) plus the exact identity check in the loss budget (§14.11) |
+| G. Guidance repeatability | `tests/test_m4_payload_boundary.py::test_drag_consistent_cutoff_search_is_repeatable` — identical cutoff time and circularization Δv across two runs |
+| H. Integrator convergence | §14.12 |
+| I. Atmosphere-relative drag | `tests/test_m4_payload_boundary.py::test_m4_dynamics_still_uses_relative_speed_for_drag` — regression check that M4 code paths still route drag through `dynamics.relative_speed` (M2, unchanged) |
+| J. M1–M3 regression | All 60 pre-existing tests still pass unchanged (verified before every commit) |
+
+### 14.10 Δv / loss accounting (reference payload, to engine cutoff)
+
+Exact derivation from the M1 §3 / M2 `dynamics.py` equation of motion
+(`v_dot = (T·cos(alpha) - D)/m - g(r)·sin(gamma)`), implemented in
+`src/ascent/loss_budget.py`:
+
+```
+ideal_dv_to_cutoff = ve * ln(m0 / m(cutoff))              (mass ACTUALLY consumed by cutoff)
+achieved_dv        = v(cutoff) - v(0)
+gravity_loss       = INTEGRAL[ g(r) * sin(gamma) ] dt      (trapezoidal, over the sampled run)
+drag_loss          = INTEGRAL[ D/m ] dt                    (trapezoidal)
+steering_loss      = ideal_dv_to_cutoff - achieved_dv - gravity_loss - drag_loss   (exact
+                                                            algebraic remainder, NOT a
+                                                            fitted/unexplained residual --
+                                                            see loss_budget.py docstring)
+```
+
+| Term | Value |
+|---|---|
+| Ideal Δv to cutoff (Tsiolkovsky, mass consumed by t=250.9 s) | 8807.4 m/s |
+| Achieved inertial Δv | 7601.8 m/s |
+| Gravity loss | 617.2 m/s |
+| Drag loss | 28.0 m/s |
+| **Steering loss** (exact remainder — nonzero angle-of-attack during the pitch-kick) | 560.4 m/s |
+| Identity residual (`ideal - (achieved+gravity+drag+steering)`) | 0.0 m/s (exact, to numerical-integration precision) |
+
+Figure: [`figures/m4_delta_v_budget.png`](figures/m4_delta_v_budget.png). Drag loss is
+small (this vehicle spends most of its early, high-density-atmosphere time at fairly
+low speed); gravity and steering losses are comparable in size, both driven by the
+same early, still-mostly-vertical phase of flight.
+
+### 14.11 Integrator convergence
+
+Three solver settings (`max_step`, `rtol`, `atol`) applied to the maximum-passing
+payload (10,333 kg) powered-ascent-to-cutoff propagation (cutoff t=251.20 s):
+
+| Setting | Final r [m] | Final v [m/s] | Final γ [deg] | Final m [kg] |
+|---|---|---|---|---|
+| (2.0, 1e-6, 1e-6) | 6,449,192.81 | 8031.860 | -0.02586 | 67,711.3726 |
+| (0.3, 1e-9, 1e-9) | 6,449,474.82 | 8031.142 | 0.00168 | 67,711.3726 |
+| (0.05, 1e-12, 1e-12) | 6,449,475.14 | 8031.141 | 0.00171 | 67,711.3726 |
+
+Tightest two settings agree to within 0.3 m in r, 8e-4 m/s in v, ~3e-5 deg in gamma,
+and effectively exact in mass — convergence is not claimed merely from solver success.
+
+(`tests/test_m4_convergence.py` asserts the tightest two settings agree to within 1 m
+in r, 1 cm/s in v, ~6e-5 deg in gamma, and 1 g in mass — all satisfied.)
+
+### 14.12 Comparison: M3 vs. M4
+
+| | M3 | M4 |
+|---|---|---|
+| Vehicle | Unchanged M1 verification vehicle | New, explicitly separate "M4 orbit-capable study vehicle" |
+| Isp | 300 s | 450 s |
+| Dry / propellant mass | 80,000 / 410,000 kg | 50,000 / 440,000 kg |
+| Guidance | Retuned gravity-turn, full-depletion burnout | Retuned gravity-turn, **commanded early cutoff** |
+| Insertion method | Raw ascent state must already be near-circular | Ascent-to-apogee + idealized circularization impulse |
+| 400 km circular orbit | **FAIL** (0/25 sweep cases) | **PASS**, up to 10,333 kg payload |
+
+M4 does not "fix" M3's vehicle — it defines and analyzes a genuinely different,
+explicitly labeled vehicle, and answers a genuinely different (narrower, standard
+ascent+circularization) mission question at the same target orbit and inclination.
+
+### 14.13 M4 limitations
+
+- The payload sweep uses ONE fixed guidance profile (kick_start/angle/duration) across
+  all payloads; §14.9 check B's investigated non-monotonicity at very low payload is a
+  direct consequence of this simplification, not re-tuned away.
+- The commanded engine cutoff is found by a numerical search (coarse bracket + bounded
+  scalar refinement), not a closed-form guidance law; a real vehicle would need an
+  onboard-computable cutoff trigger, which is out of scope here.
+- The circularization burn is fully idealized (impulsive, unconstrained thrust, not
+  drawn from the vehicle's own propellant) — finite-thrust upper-stage design is
+  explicitly excluded from M4.
+- The 15 km altitude tolerance and 1500 m/s circularization-delta-v cap are documented,
+  reasoned engineering choices, not derived from a specific mission requirement.
+- Inclination remains fixed at 28.5° throughout M4 (no inclination trade — that is M5).
+- As in M2/M3, drag's direction (not just magnitude) is taken anti-parallel to inertial
+  velocity rather than to the relative-wind vector; unchanged, not revisited in M4.

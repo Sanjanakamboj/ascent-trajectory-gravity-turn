@@ -34,6 +34,7 @@ class AscentResult:
     y_events: list
     success: bool
     message: str
+    sol: Optional[object] = None  # scipy OdeSolution if dense_output=True, else None
 
 
 def run_ascent(y0: np.ndarray, t_span, params: AscentParams, control: ControlFn,
@@ -82,4 +83,5 @@ def run_ascent(y0: np.ndarray, t_span, params: AscentParams, control: ControlFn,
         t=sol.t, r=r, theta=theta, v=v, gamma=gamma, m=m,
         t_events=sol.t_events, y_events=sol.y_events,
         success=sol.success, message=sol.message,
+        sol=sol.sol if dense_output else None,
     )
