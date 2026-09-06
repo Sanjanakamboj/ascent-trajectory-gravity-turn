@@ -389,3 +389,246 @@ thrust/mass term → checks 3 & 4; gravity/orbital-energy term → checks 2, 5 &
 rotation initial condition → check 9). No equation is introduced in §3 without a
 corresponding verification path, and no verification check depends on an equation not
 derived in §3.
+
+---
+
+## 12. Milestone 2 — physics implementation and verification
+
+> **M2 is physics verification, not an optimized ascent.** No gravity-turn guidance law
+> (velocity-following, zero angle-of-attack after a pitch-kick) is implemented here —
+> that is explicitly M3 scope. All prescribed controls below are fixed/open-loop and
+> were not tuned to reach orbit or to improve any performance metric.
+
+### 12.1 M1 re-audit (before any code was written)
+
+Before implementing M2, the M1 hand calculations were independently recomputed from the
+constants and vehicle parameters in §1. All values matched exactly
+(`v_circ = 7668.6 m/s`, `v_rot = 408.7 m/s`, `mdot = 2583.3 kg/s`, `t_burn = 158.7 s`,
+`mass_ratio = 5.556`, `dv_ideal = 5044.9 m/s`, `T/W0 = 1.550`). **No arithmetic or
+definition error was found**; the M1 vehicle is retained unchanged as the
+**physics-verification baseline** for M2 (distinct from an "orbit-capable vehicle,"
+which remains an open later-milestone design question — see §7.4, unchanged).
+
+### 12.2 Atmosphere model implemented (`src/ascent/atmosphere.py`)
+
+A **single-exponential** density model — a deliberate, documented scope decision, and a
+discrepancy from the M1 §1.6 note that a layered US Standard Atmosphere 1976 table was
+"planned": a single exponential is deterministic, trivial to verify analytically, and
+sufficient for M2's goal of verifying the dynamics/drag plumbing. It is explicitly not a
+high-fidelity launch atmosphere.
+
+```
+rho(h) = RHO0 * exp(-h / SCALE_HEIGHT)   for 0 <= h <= H_MAX
+rho(h) = RHO0                            for h < 0        (clamped to sea level)
+rho(h) = 0                               for h > H_MAX    (vacuum approximation)
+```
+
+`RHO0 = 1.225 kg/m^3` (sea-level reference), `SCALE_HEIGHT = 8500 m`,
+`H_MAX = 100,000 m`. Tested for: sea-level reference value, positivity, monotonic
+decrease, exact exponential scaling (`rho(8500)/rho(0) = e^-1` etc.), exact-zero
+high-altitude limit, and negative-altitude clamping (`tests/test_atmosphere.py`, 7
+tests).
+
+### 12.3 Propulsion model implemented (`src/ascent/propulsion.py`)
+
+```
+mdot           = -T / (Isp * g0)
+a_T            = T / m
+m(t)           = m0 + mdot * t                 (mdot negative; unclamped form)
+t_burn         = m_propellant / |mdot|
+dv_ideal       = Isp * g0 * ln(m0 / mf)
+```
+
+plus `clamped_mass_flow_rate`, which forces `mdot = 0` once `mass <= m_min`
+(`m_min = m_dry + m_payload`) — mass can never be driven below dry+payload regardless of
+commanded thrust. Verified against the exact M1 hand-calc values (`t_burn`, `mdot`,
+`dv_ideal`, `T/W0`), linear mass depletion, integrated-mass-loss consistency, and
+monotonically increasing thrust acceleration as mass falls (`tests/test_propulsion.py`,
+8 tests).
+
+### 12.4 Point-mass ascent ODE implemented (`src/ascent/dynamics.py`)
+
+State `y = [r, theta, v, gamma, m]`, exactly the M1 §2 convention. General form (thrust
+direction `chi`, angle of attack `alpha = chi - gamma`, physics separated from any
+guidance law via a `control(t, y, params) -> (thrust, chi)` callback):
+
+```
+r_dot     = v * sin(gamma)
+theta_dot = v * cos(gamma) / r
+v_dot     = (T * cos(alpha) - D) / m  -  g(r) * sin(gamma)
+gamma_dot = [ T * sin(alpha) / m + (v**2/r - g(r)) * cos(gamma) ] / v      (v >= V_FLOOR)
+gamma_dot = 0                                                              (v <  V_FLOOR)
+m_dot     = clamped_mass_flow_rate(...)
+g(r)      = mu / r**2
+```
+
+When `chi == gamma` (zero angle of attack, thrust aligned with velocity — the M1
+gravity-turn assumption), `alpha = 0` and this reduces **exactly** to the M1 §3
+equations; verified algebraically in
+`test_dynamics.py::test_zero_angle_of_attack_reduces_to_m1_equations`.
+
+**`V_FLOOR = 1e-3 m/s`, gamma-freeze at liftoff.** `gamma_dot` divides by `v` and is
+singular as `v -> 0`. Below `V_FLOOR`, `gamma_dot` is held at exactly 0 rather than
+integrated — a standard, explicitly documented handling of the well-known gravity-turn
+liftoff singularity, not a bug.
+
+### 12.5 Earth rotation / atmosphere-relative velocity (`dynamics.py`)
+
+Preserved exactly as the distinction M1 §3 required. The rotating atmosphere is
+approximated, within this planar model, as purely tangential (horizontal) with radius-
+dependent magnitude `v_atm(r) = omega_earth * r * cos(lat)`, which reduces to the M1
+surface value at `r = R_earth` (`tests/test_earth_rotation.py::
+test_surface_rotational_speed_matches_m1_hand_calc`, exact match to `408.7 m/s`). This
+is an explicit planar approximation: exact for a purely equatorial-tangent plane, and
+the natural simplification for the due-east baseline case (`inclination = latitude`)
+where the orbital plane's local horizontal locally coincides with Earth's rotation
+direction.
+
+Relative (air-relative) speed is computed from the full radial+tangential velocity
+vector, not just the tangential component:
+
+```
+v_radial     = v * sin(gamma)
+v_tangential = v * cos(gamma)
+v_rel        = sqrt(v_radial**2 + (v_tangential - v_atm(r))**2)
+```
+
+Drag magnitude uses `v_rel`; consistent with the M1 §3 equations (which place drag only
+in the `v_dot` equation, not `gamma_dot`), drag's *direction* is taken anti-parallel to
+the inertial velocity in these two ODEs — only its magnitude uses the relative-wind
+speed. A fully vector-resolved drag treatment is a possible future refinement, not
+implemented in M2.
+
+Four dedicated tests (`test_earth_rotation.py`) were written specifically to fail if
+inertial speed were substituted for atmosphere-relative speed: a stationary/co-rotating
+pad vehicle has exactly zero relative speed; a due-east inertial velocity gets the
+correct rotation subtraction (and is shown to differ materially from raw inertial
+speed); the zero-Earth-rotation limit reduces to plain inertial speed; and a purely
+radial (vertical) inertial velocity still picks up the correct nonzero relative
+tangential component from atmospheric rotation. All pass.
+
+**Genuine issue found and corrected during M2 (not an M1 error, an M2 implementation
+choice):** an early draft of the diagnostic script (§12.9) initialized the ascent state
+with `v0 = 0` (idealized "at rest," ignoring the pad's co-rotation speed). This is
+inconsistent with M1 §2's own statement that "at liftoff the vehicle is already
+co-rotating... its inertial velocity is not zero." With `v0 = 0`, the relative-speed
+formula above produces a spurious ~409 m/s "relative wind" at `t = 0` (since the
+vehicle's encoded tangential inertial speed is 0 while the atmosphere's is `v_rot`),
+which showed up as an unphysical maximum dynamic pressure exactly at liftoff. This was
+corrected by initializing the diagnostic trajectory with the physically correct
+`v0 = v_rot`, `gamma0 = 0` (purely horizontal, co-rotating) initial condition, which
+resolves the artifact — max dynamic pressure now occurs at `t ~= 54.5 s`,
+`h ~= 10.5 km`, matching the expected real-vehicle max-Q altitude range and the M1 §7
+hand-estimate order of magnitude closely. See §12.9. This correction only affects the
+diagnostic script's initial condition, not any dynamics equation, unit test, or
+documented M1 result.
+
+One further, real (not a bug) consequence of this corrected initial condition is worth
+recording: because the vehicle's inertial velocity at liftoff is already substantially
+horizontal (`v_rot ~= 409 m/s`) rather than zero, a purely radial ("vertical") thrust
+command is nearly perpendicular to the velocity vector at that instant, so it initially
+curves `gamma` upward relatively gradually rather than producing an immediate steep
+climb — mathematically the same effect as a radial burn on a near-circular orbit
+changing orbit shape faster than it changes speed. This is a correctly-modeled
+consequence of describing ascent in the true inertial frame with Earth rotation
+included, not a defect, and is exactly the kind of subtlety M2's verification-first
+approach is meant to surface honestly rather than paper over.
+
+### 12.6 Prescribed controls (`src/ascent/controls.py`)
+
+Four control functions, none of them a guidance law:
+
+- `vertical_thrust_control` — Case A, constant thrust held vertical (`chi = 90 deg`).
+- `fixed_pitch_control` — Case B, constant thrust at a fixed, prescribed `chi`.
+- `coast_control` — Case C, thrust off.
+- `vertical_rise_then_pitch_kick_control` — a minimal, explicitly diagnostic-only
+  realization of the M1 §1.7 pitch-kick concept (vertical, then one fixed pitch angle
+  held constant); not tuned, not a continuously-updated guidance law.
+
+### 12.7 Events and termination (`dynamics.py`, `simulation.py`)
+
+| Event | Direction | Terminal? |
+|---|---|---|
+| Propellant depletion (`m` crosses `m_min` from above) | `-1` | No (logged for diagnostics) |
+| Ground impact (`r` crosses `R_earth` from above) | `-1` | Yes |
+| Target-altitude crossing (optional, diagnostic) | `0` | No (default) |
+
+Mass is independently guaranteed never to drop below `m_min` by the RHS's own clamp
+(`propulsion.clamped_mass_flow_rate`), verified directly in
+`test_verification.py::test_propellant_depletion_event_fires_at_expected_time` (mass
+stays within 1e-2 kg of `m_min`, i.e. a ~2e-8 relative floating-point/adaptive-step
+residual at the event crossing, not a real propellant debt) and in the same test's
+depletion-time check (fires within 0.1% of the analytic `t_burn`). Ground-impact
+termination is verified on a descending ballistic case
+(`test_ground_impact_event_terminates_descending_trajectory`).
+
+### 12.8 Independent verification results
+
+All required checks (M2 objective §8 A-H) pass:
+
+| Check | Result |
+|---|---|
+| A. Zero-drag limit | `Cd=0` removes drag exactly (`drag_acceleration(...) == 0.0`); zero-drag RHS gives strictly larger `v_dot` than the drag-on case |
+| B. Zero-thrust ballistic limit | Specific orbital energy and angular momentum constant to within `< 1e-8` relative over a 600 s coast (drag disabled to isolate gravity) |
+| C. Constant radial-thrust sanity case | Forward-Euler estimate from the analytic RHS at `t=0` matches a `dt=1e-3 s` integration to `rel=1e-3` (residual consistent with 2nd-order Euler truncation) |
+| D. Mass-flow analytical check | Integrated mass history matches `m(t) = m0 - |mdot| t` to `rtol=1e-6` over the whole burn |
+| E. Tsiolkovsky consistency | With `mu=0, Cd=0` (propulsion-only reduction of the full ascent RHS, not a separately hand-coded formula), integrated `delta_v` matches `Isp*g0*ln(m0/mf)` to `rel=1e-4` |
+| F. Earth-rotation check | `atmosphere_corotation_speed(R_earth, lat)` reproduces the M1 hand value `408.7 m/s` exactly |
+| G. Integrator convergence | 3 tolerance/step settings (`rtol` 1e-6 -> 1e-9 -> 1e-12); successive differences shrink, tightest two agree to `rtol=1e-5` |
+| H. Dimensional/sign checks | Gravity decreases with altitude and matches `mu/r**2` exactly; drag only ever subtracts from `v_dot`; mass strictly decreases only while thrusting (`m_dot < 0` thrusting, `== 0` coasting or depleted); `h = r - R_earth` exact |
+
+45 tests total (`pytest -W error`), all passing.
+
+### 12.9 M2 diagnostic trajectory (`scripts/m2_diagnostic_trajectory.py`)
+
+Unchanged M1 physics-verification baseline vehicle, integrated with
+`vertical_rise_then_pitch_kick_control` (vertical for the first 10 s, then a single
+fixed, untuned pitch-kick to `chi = 88 deg`, held constant for the rest of the burn — no
+gravity-turn guidance law). Initial condition: `r0 = R_earth`, `v0 = v_rot = 408.7 m/s`,
+`gamma0 = 0` (co-rotating with the launch site, per §2 and the correction in §12.5).
+
+**Figure:** [`figures/m2_diagnostic_trajectory.png`](figures/m2_diagnostic_trajectory.png)
+— explicitly titled *"M2 physics-verification trajectory — prescribed control, NOT
+optimized for orbit"*. This is diagnostic/supporting only, not a validated result (per
+the repo-wide rule in `README.md`).
+
+**Results:**
+
+| Quantity | Value |
+|---|---|
+| Burn duration (matches M1 hand calc) | 158.7 s |
+| Burnout mass | 90,000.0 kg (== `m_min` exactly, propellant fully depleted) |
+| Max altitude | 903.8 km, at t = 594.8 s |
+| Max speed (inertial) | 3543.6 m/s, at t = 158.8 s (burnout) |
+| Max dynamic pressure | 34.1 kPa, at t = 54.5 s, h = 10.5 km |
+| Ground impact within 758.7 s window | No (still descending, h = 802.7 km, gamma = -67.8 deg, at end of window) |
+| 400 km circular-orbit conditions achieved | **No** |
+
+**Interpretation:** the vehicle flies well past 400 km altitude (apogee ~904 km) because
+the fixed, near-vertical pitch profile used here does not turn the trajectory toward
+horizontal the way a real gravity-turn guidance law would — it is not a guided ascent.
+It does **not** achieve circular-orbit conditions at 400 km (`v = 7668.6 m/s`,
+`gamma ~= 0`) at any point; by burnout it has `v = 3543.6 m/s` at `gamma ~= 76 deg`,
+nowhere near the required speed or horizontal flight-path angle, consistent with the
+Δv deficit already identified in M1 §7.4 (ideal Δv ~5.05 km/s vs a rough ~8.9-9.5 km/s
+LEO budget) compounded by this pitch profile not being an efficient (velocity-aligned)
+gravity turn. **This "no" is the expected, honest result for this milestone** — no
+assumption was retuned to force a different answer, per the M2 task instructions.
+
+The max-dynamic-pressure result (34.1 kPa at ~10.5 km altitude) is a strong,
+independent cross-check on the atmosphere/drag/relative-velocity implementation: it
+lands within the same order of magnitude as, and at very close to the same altitude as
+assumed by, the M1 §7 hand estimate (~40.5 kPa, assumed at 11-13 km) and real vehicles'
+typical max-Q (e.g. ~30 kPa for Falcon 9).
+
+### 12.10 Discrepancies from M1 (summary)
+
+1. Atmosphere: single-exponential model implemented instead of the layered US Standard
+   Atmosphere 1976 that M1 §1.6 listed as "planned" — a documented M2 scope decision
+   (§12.2), not an error; a higher-fidelity table remains a possible future refinement.
+2. Diagnostic-script initial condition corrected mid-M2 from an M1-inconsistent
+   `v0 = 0` to the M1-documented `v0 = v_rot, gamma0 = 0` (§12.5) — this is a correction
+   toward, not away from, M1's stated physics, and did not change any M1 equation,
+   constant, or hand-calculation result.
+
+No other M1 equation, constant, or hand-calculation result was altered.

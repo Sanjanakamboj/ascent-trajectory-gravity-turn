@@ -13,8 +13,10 @@ approved.
 
 - [x] **M1 — Mission definition, equations, conventions, hand calculations, verification
       plan, limitations.** See [`DESIGN.md`](DESIGN.md). No integrator yet.
-- [ ] M2 — Atmosphere + propulsion + point-mass ascent ODE + basic trajectory
-      verification.
+- [x] **M2 — Atmosphere + propulsion + point-mass ascent ODE + basic trajectory
+      verification.** See [`DESIGN.md` §12](DESIGN.md#12-milestone-2--physics-implementation-and-verification).
+      Physics verification only, no guidance law; baseline vehicle does **not** reach
+      400 km circular LEO with a fixed pitch profile (expected — see §12.9).
 - [ ] M3 — Gravity-turn guidance, full trajectory profile, event handling, numerical
       convergence.
 - [ ] M4 — Payload-to-orbit solve at the baseline inclination.
@@ -33,12 +35,28 @@ Figures will be explicitly labeled as such until the verification plan in `DESIG
 
 ```
 DESIGN.md       mission definition, governing equations, conventions, hand calcs,
-                verification plan, limitations (start here)
-src/ascent/     simulation package (empty placeholder as of M1)
-tests/          pytest test suite
-scripts/        one-off analysis / plotting entry points (empty as of M1)
-figures/        generated figures (empty as of M1)
+                verification plan, limitations, M2 implementation notes (start here)
+src/ascent/     simulation package
+    constants.py    Earth constants + M1 baseline vehicle
+    atmosphere.py   simplified exponential density model
+    propulsion.py   mass-flow / thrust / Tsiolkovsky helpers
+    dynamics.py     planar point-mass ascent ODE + Earth-rotation handling
+    controls.py     prescribed (non-guided) thrust-direction profiles
+    simulation.py   solve_ivp wrapper + event handling
+tests/          pytest test suite (atmosphere, propulsion, dynamics, Earth rotation,
+                independent verification checks)
+scripts/        m2_diagnostic_trajectory.py — diagnostic-only trajectory + figure
+figures/        m2_diagnostic_trajectory.png (diagnostic/supporting, not validated)
 ```
+
+### M2 diagnostic trajectory
+
+![M2 diagnostic trajectory](figures/m2_diagnostic_trajectory.png)
+
+Prescribed (non-guided) pitch profile on the unchanged M1 baseline vehicle — see
+`DESIGN.md` §12.9. **Diagnostic/supporting only, not a validated result.** The vehicle
+does not reach 400 km circular orbit, which is the expected outcome given the Δv
+deficit already documented in `DESIGN.md` §7.4.
 
 ## Development
 
