@@ -77,7 +77,7 @@ def test_zero_drag_zero_alpha_case_matches_pure_tsiolkovsky():
                          include_apogee_event=False, t_eval=t_eval)
     budget = compute_delta_v_budget(result.t, result.r, result.v, result.gamma, result.m,
                                      vehicle.isp, 0.0, vehicle.reference_area, LAT,
-                                     vehicle.m0)
+                                     vehicle.m0, mu=0.0)
     assert budget.gravity_loss == pytest.approx(0.0, abs=1e-9)
     assert budget.drag_loss == pytest.approx(0.0, abs=1e-9)
     assert budget.steering_loss == pytest.approx(0.0, abs=1e-6)

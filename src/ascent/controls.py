@@ -18,6 +18,8 @@ from typing import Tuple
 
 import numpy as np
 
+from . import dynamics as dyn
+
 
 def vertical_thrust_control(thrust: float):
     """Case A: constant thrust, held vertical (chi = 90 deg) for all time.
@@ -89,7 +91,23 @@ def gravity_turn_control(thrust: float, kick_start_time: float, kick_angle_rad: 
     chi_kicked = chi_vertical - kick_angle_rad
 
     def control(t, y, params):
-        gamma = y[3]
+        v, gamma = y[2], y[3]
+
+        # M5 finding: at v EXACTLY below V_FLOOR (only possible when the initial
+        # in-plane speed itself is ~0 -- i.e. a near-polar direct-ascent azimuth,
+        # DESIGN.md M5 S3/S13; never the case for M1-M4's due-east-derived v0) AND
+        # gamma == chi_vertical's complement such that alpha=90 exactly, commanding
+        # vertical thrust gives a v_dot of EXACTLY 0 while gamma_dot is separately
+        # frozen (also because v < V_FLOOR) -- a genuine mathematical deadlock
+        # (v=0, gamma=0 is an exact fixed point of the ODE under "always command
+        # vertical"). "Vertical" is no better-defined than any other direction while
+        # v < V_FLOOR (the same reasoning dynamics.py already uses to freeze
+        # gamma_dot there), so this guidance law tracks the current (frozen) gamma
+        # instead during that regime -- alpha=0, so v_dot = T/m - g*sin(gamma) is
+        # generically nonzero, breaking the deadlock as soon as it can. This branch
+        # is inactive for every M1-M4 case (v0 there is always >> V_FLOOR).
+        if v < dyn.V_FLOOR:
+            return thrust, gamma
 
         if t < kick_start_time:
             return thrust, chi_vertical

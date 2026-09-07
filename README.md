@@ -27,8 +27,14 @@ approved.
       fraction — NOT the M1–M3 verification vehicle, which remains a documented FAILURE
       under the M4 criterion) achieves 400 km circular insertion (ascent + idealized
       circularization) up to **10,333 kg payload**.
-- [ ] M5 — Inclination sweep, launch-azimuth/Earth-rotation coupling, payload-vs-
-      inclination curve.
+- [x] **M5 — Direct-ascent inclination sweep, launch-azimuth/Earth-rotation coupling,
+      payload-vs-inclination curve.** See [`DESIGN.md` §15](DESIGN.md#15-milestone-5--direct-ascent-payload-to-orbit-vs-target-inclination).
+      28.5° baseline: **10,334 kg**. 90° polar endpoint: **10,375 kg**. The result is
+      an honest, investigated **non-monotonic** curve (10,141–10,418 kg across the
+      swept range) for this vehicle's guidance-search landscape, not a smooth decline
+      — see §15.11. This is a **direct-ascent** trade under the current simplified
+      (planar-dynamics, idealized-circularization) model; no dogleg, on-orbit plane
+      change, or retrograde launch is modeled.
 - [ ] M6 — Independent validation, sensitivity analysis, figure audit, packaging.
 
 ## Important note on figures
@@ -60,7 +66,19 @@ scripts/        m2_diagnostic_trajectory.py, m3_gravity_turn_sweep.py, m3_trajec
 figures/        generated figures (diagnostic/supporting unless noted as validated)
 ```
 
-### M4 orbit-capable study vehicle — payload capability (current headline result)
+### M5 payload vs. target inclination (current headline result)
+
+![M5 payload vs inclination](figures/m5_payload_vs_inclination.png)
+
+Direct-ascent payload-to-orbit trade for the M4 orbit-capable study vehicle across the
+launch site's full direct-ascent inclination range (28.5°–90°) — see `DESIGN.md` §15.
+28.5° baseline: 10,334 kg; 90° polar: 10,375 kg. The curve is honestly non-monotonic
+(10,141–10,418 kg range) for this vehicle's guidance-search landscape, not a clean
+decline; see `DESIGN.md` §15.11 for the physical interpretation. This is a
+**direct-ascent** trade under the current simplified model — no dogleg, on-orbit plane
+change, or retrograde launch is modeled.
+
+### M4 orbit-capable study vehicle — payload capability
 
 ![M4 payload capability](figures/m4_payload_capability.png)
 

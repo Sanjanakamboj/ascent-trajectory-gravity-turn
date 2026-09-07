@@ -80,7 +80,18 @@ from .constants import G0, MU_EARTH, OMEGA_EARTH, R_EARTH
 from . import atmosphere as atmo
 from .propulsion import clamped_mass_flow_rate
 
-V_FLOOR = 1e-3  # m/s, velocity below which gamma is frozen rather than integrated
+V_FLOOR = 1.0  # m/s, velocity below which gamma is frozen rather than integrated. Raised
+# from 1e-3 to 1.0 m/s during M5 (DESIGN.md M5 S13): gamma_dot's magnitude scales like
+# 1/v near this threshold, and M1-M4 never actually integrated THROUGH the v=1e-3
+# crossing in the interior of a real trajectory (v0 was always hundreds of m/s there).
+# M5's near-polar direct-ascent case does cross it (v0 -> 0 as inclination -> 90 deg),
+# and the resulting near-singular gamma_dot ~ 1/v transient right at a 1e-3 m/s
+# threshold produced severe, genuine numerical stiffness (a real trajectory needed
+# >170,000 adaptive steps for just 30 s of flight). A larger, still numerically tiny,
+# threshold (1 m/s is still >2 orders of magnitude below any ascent speed of interest)
+# makes that same transient far more benign (1/v ~ 15 rather than ~15,000) without
+# changing the frozen-gamma PHILOSOPHY at all, and resolves the stiffness in practice.
+
 
 # A control function takes (t, y, params) and returns (thrust_N, chi_rad).
 ControlFn = Callable[[float, np.ndarray, "AscentParams"], Tuple[float, float]]
@@ -88,7 +99,12 @@ ControlFn = Callable[[float, np.ndarray, "AscentParams"], Tuple[float, float]]
 
 @dataclass(frozen=True)
 class AscentParams:
-    """Explicit, immutable simulation parameters (no hidden globals)."""
+    """Explicit, immutable simulation parameters (no hidden globals).
+
+    ``azimuth_rad`` (M5): launch azimuth, clockwise from north, of THIS trajectory's
+    launch plane. Defaults to 90 deg (due east), matching every M1-M4 case exactly.
+    See ``relative_speed`` for how a non-90-deg azimuth is used.
+    """
 
     isp: float
     reference_area: float
@@ -99,6 +115,7 @@ class AscentParams:
     r_earth: float = R_EARTH
     omega_earth: float = OMEGA_EARTH
     g0: float = G0
+    azimuth_rad: float = np.pi / 2
 
 
 def local_gravity(r: float, mu: float = MU_EARTH) -> float:
@@ -119,18 +136,34 @@ def atmosphere_corotation_speed(r: float, latitude_rad: float,
 
 
 def relative_speed(v: float, gamma: float, r: float, latitude_rad: float,
-                    omega_earth: float = OMEGA_EARTH) -> float:
+                    omega_earth: float = OMEGA_EARTH, azimuth_rad: float = np.pi / 2) -> float:
     """Speed relative to the rotating atmosphere, |v_vec - v_atm_vec|.
 
-    Decomposes the inertial velocity into radial/tangential components, subtracts the
-    (purely tangential) atmospheric co-rotation velocity, and returns the magnitude of
-    the result.
+    Decomposes the inertial velocity into radial/tangential (in-launch-plane)
+    components and subtracts the atmosphere's IN-PLANE co-rotation component from the
+    tangential one, exactly as in M1-M4 (default ``azimuth_rad = 90 deg``, due east).
+
+    M5 (DESIGN.md M5 S3): for a launch azimuth other than due east, Earth's true
+    (eastward) atmospheric rotation also has a component CROSS the launch plane,
+    ``v_atm_total * cos(azimuth_rad)`` (``inclination.cross_track_rotational_component``).
+    The vehicle's planar dynamics carry no cross-track velocity of their own (a
+    standard direct-ascent simplification -- the vehicle is confined to its launch
+    plane for all of M1-M5), so this cross-track atmosphere motion is entirely a
+    relative-wind contribution and is included here as a third (perpendicular)
+    component of the relative-velocity vector, rather than silently dropped:
+
+        v_rel = sqrt(v_radial^2 + (v_tangential - v_atm*sin(Az))^2 + (v_atm*cos(Az))^2)
+
+    At ``azimuth_rad = 90 deg`` (due east, all of M1-M4), ``cos(Az) = 0`` and this is
+    IDENTICAL to the M1-M4 formula -- exact regression, not an approximation of it.
     """
     v_radial = v * np.sin(gamma)
     v_tangential = v * np.cos(gamma)
-    v_atm = atmosphere_corotation_speed(r, latitude_rad, omega_earth)
-    v_rel_tangential = v_tangential - v_atm
-    return np.sqrt(v_radial**2 + v_rel_tangential**2)
+    v_atm_total = atmosphere_corotation_speed(r, latitude_rad, omega_earth)
+    v_atm_inplane = v_atm_total * np.sin(azimuth_rad)
+    v_atm_cross = v_atm_total * np.cos(azimuth_rad)
+    v_rel_tangential = v_tangential - v_atm_inplane
+    return np.sqrt(v_radial**2 + v_rel_tangential**2 + v_atm_cross**2)
 
 
 def drag_acceleration(v_rel: float, h: float, m: float, cd: float, area: float) -> float:
@@ -156,8 +189,21 @@ def ascent_rhs(t: float, y: np.ndarray, params: AscentParams, control: ControlFn
     mdot = clamped_mass_flow_rate(thrust, params.isp, m, params.m_min, params.g0)
 
     g = local_gravity(r, params.mu)
-    v_rel = relative_speed(v, gamma, r, params.latitude_rad, params.omega_earth)
-    a_drag = drag_acceleration(v_rel, h, m, params.drag_coefficient, params.reference_area)
+    v_rel = relative_speed(v, gamma, r, params.latitude_rad, params.omega_earth,
+                            params.azimuth_rad)
+    # Below V_FLOOR the vehicle's own inertial-velocity DIRECTION is undefined (the
+    # same reason gamma_dot is frozen below), so a drag magnitude computed from v_rel
+    # cannot be meaningfully assigned a direction "anti-parallel to inertial v" either
+    # -- applying it anyway would silently subtract an undefined-direction force from
+    # v_dot. This was latent but invisible in M1-M4 (v0 was always well above V_FLOOR,
+    # the due-east co-rotation speed); M5 exposed it directly: at a near-polar azimuth
+    # (small useful in-plane boost, v0 near 0) the atmosphere's cross-track rotation
+    # component alone gives a nonzero v_rel even at v=0, which produced a spurious
+    # negative v_dot at t=0 (drag decelerating an already-stationary vehicle) before
+    # this guard was added. Zeroing drag below V_FLOOR is a direct, minimal extension
+    # of the existing V_FLOOR philosophy, not a new one.
+    a_drag = (drag_acceleration(v_rel, h, m, params.drag_coefficient, params.reference_area)
+              if v >= V_FLOOR else 0.0)
 
     alpha = chi - gamma
 
@@ -188,11 +234,27 @@ def make_propellant_depletion_event(params: AscentParams):
     return event
 
 
+GROUND_EVENT_DEADBAND = 1.0  # m; see make_ground_impact_event docstring
+
+
 def make_ground_impact_event(params: AscentParams):
-    """Terminal event: altitude crosses zero while descending (r decreasing through R_earth)."""
+    """Terminal event: altitude crosses zero while descending (r decreasing through R_earth).
+
+    A small (1 m) deadband is subtracted from the trigger altitude. Every M1-M5
+    trajectory starts at r = r_earth EXACTLY; whenever gamma is also exactly 0 there
+    (e.g. the M5 near-polar case, where the vehicle's in-plane velocity is ~0 and
+    dynamics.py freezes gamma_dot), r_dot is analytically exactly 0 for a stretch of
+    time -- a genuine, real "flat start," not a descent. A found, real failure mode
+    (M5): with the event armed at EXACTLY r = r_earth, floating-point noise in the
+    integrator's internal stages during that flat interval could dip the event
+    function a hair below zero, and solve_ivp's direction=-1 root-finding would then
+    report a (spurious) ground impact at t=0. A 1 m deadband (utterly negligible
+    against any real descent, which moves the vehicle by meters to kilometers) absorbs
+    that noise without weakening real impact detection.
+    """
 
     def event(t, y):
-        return y[0] - params.r_earth
+        return y[0] - (params.r_earth - GROUND_EVENT_DEADBAND)
 
     event.terminal = True
     event.direction = -1
