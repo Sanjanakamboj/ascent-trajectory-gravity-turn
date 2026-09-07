@@ -1,115 +1,203 @@
 # Ascent Trajectory / Gravity Turn
 
-Launch-vehicle ascent simulation portfolio project. Goal: produce (1) an ascent
-trajectory profile for a single-stage-baseline launch vehicle flying a gravity-turn
-ascent to a target circular LEO, and (2) a payload-to-orbit trade curve versus target
-orbital inclination.
+A launch-vehicle ascent-trajectory engineering study: point-mass gravity-turn ascent
+dynamics, a verified orbit-capable study vehicle, its payload-to-orbit capability, and
+how that capability changes with target orbital inclination via direct ascent.
 
-This project is built **milestone-by-milestone**. Each milestone is committed and pushed
-individually; no milestone is started before the previous one is checkpointed and
-approved.
+Built milestone-by-milestone (M1–M6), each one independently verified and committed.
+Full derivations, conventions, and per-milestone verification detail live in
+[`DESIGN.md`](DESIGN.md); this page is the consolidated summary.
 
-## Status
+## 1. Project objective
 
-- [x] **M1 — Mission definition, equations, conventions, hand calculations, verification
-      plan, limitations.** See [`DESIGN.md`](DESIGN.md). No integrator yet.
-- [x] **M2 — Atmosphere + propulsion + point-mass ascent ODE + basic trajectory
-      verification.** See [`DESIGN.md` §12](DESIGN.md#12-milestone-2--physics-implementation-and-verification).
-      Physics verification only, no guidance law; baseline vehicle does **not** reach
-      400 km circular LEO with a fixed pitch profile (expected — see §12.9).
-- [x] **M3 — Gravity-turn guidance, full trajectory profile, event handling, numerical
-      convergence.** See [`DESIGN.md` §13](DESIGN.md#13-milestone-3--gravity-turn-guidance-orbital-diagnostics-and-one-verified-trajectory).
-      Verified guidance law + 25-case parameter sweep on the unchanged vehicle; 0/25
-      cases achieve 400 km circular orbit (expected, given the M1 §7.4 Δv deficit).
-- [x] **M4 — Orbit-capable study vehicle + payload-to-orbit solve at 400 km / 28.5°.**
-      See [`DESIGN.md` §14](DESIGN.md#14-milestone-4--orbit-capable-study-vehicle-and-payload-to-orbit-solve).
-      A new, explicitly separate **M4 study vehicle** (higher Isp, higher propellant
-      fraction — NOT the M1–M3 verification vehicle, which remains a documented FAILURE
-      under the M4 criterion) achieves 400 km circular insertion (ascent + idealized
-      circularization) up to **10,333 kg payload**.
-- [x] **M5 — Direct-ascent inclination sweep, launch-azimuth/Earth-rotation coupling,
-      payload-vs-inclination curve.** See [`DESIGN.md` §15](DESIGN.md#15-milestone-5--direct-ascent-payload-to-orbit-vs-target-inclination).
-      28.5° baseline: **10,334 kg**. 90° polar endpoint: **10,375 kg**. The result is
-      an honest, investigated **non-monotonic** curve (10,141–10,418 kg across the
-      swept range) for this vehicle's guidance-search landscape, not a smooth decline
-      — see §15.11. This is a **direct-ascent** trade under the current simplified
-      (planar-dynamics, idealized-circularization) model; no dogleg, on-orbit plane
-      change, or retrograde launch is modeled.
-- [ ] M6 — Independent validation, sensitivity analysis, figure audit, packaging.
+1. Implement and verify a planar point-mass gravity-turn ascent simulation.
+2. Determine whether a single-stage baseline vehicle, sized purely for physics
+   verification, reaches a 400 km circular LEO — and if not, why.
+3. Define a separate, explicitly labeled orbit-capable study vehicle and solve for its
+   maximum payload to 400 km / 28.5°.
+4. Quantify how that payload changes as the target inclination is swept from the
+   launch site's minimum (28.5°) up to polar (90°) via direct ascent.
 
-## Important note on figures
+## 2. Key results
 
-Any figure produced before the trajectory model is validated (M3's convergence study and
-the M9 checks in `DESIGN.md`) is **diagnostic/supporting only**, not a validated result.
-Figures will be explicitly labeled as such until the verification plan in `DESIGN.md`
-§9 has been executed.
+| Result | Value |
+|---|---|
+| M1–M3 verification vehicle reaches 400 km circular orbit? | **No** — 0/25 guidance cases (expected; Δv-deficient by design, see [`DESIGN.md` §7.4](DESIGN.md#74-does-this-vehicle-reach-orbit-a-first-order-check)) |
+| M4 orbit-capable study vehicle, max payload @ 400 km / 28.5° | **≈ 10.33 t** (10,333 kg PASS / 10,334 kg FAIL boundary) |
+| M5 payload @ 28.5° (baseline) | 10,334 kg |
+| M5 payload @ 90° (polar) | 10,375 kg (**+0.40%**, not a penalty) |
+| M5 payload range across 28.5°–90° | 10,141–10,418 kg |
+| Useful Earth-rotation assistance, 28.5° → 90° | 408.7 m/s → ~0 m/s (strictly monotonic) |
+| Payload vs. inclination monotonic? | **No** — and M6 sensitivity testing shows this is largely a guidance-search-resolution effect, not a validated physical trend (§9) |
+| Tests passing | 119/119 (`pytest -W error`) |
 
-## Repository layout
+## 3. Model architecture
 
 ```
-DESIGN.md       mission definition, equations, conventions, hand calcs, verification
-                plan, limitations, M2-M4 implementation notes (start here)
-src/ascent/     simulation package
-    constants.py       Earth constants, M1-M3 baseline vehicle, M4 study vehicle
-    atmosphere.py       simplified exponential density model
-    propulsion.py       mass-flow / thrust / Tsiolkovsky helpers
-    dynamics.py         planar point-mass ascent ODE + Earth-rotation handling
-    controls.py         gravity-turn guidance law + prescribed thrust-direction profiles
-    simulation.py       solve_ivp wrapper + event handling
-    orbital.py          orbital-element diagnostics + orbit-insertion criteria
-    insertion_search.py M4 drag-consistent engine-cutoff search
-    loss_budget.py       M4 delta-v / loss accounting
-tests/          pytest test suite
-scripts/        m2_diagnostic_trajectory.py, m3_gravity_turn_sweep.py, m3_trajectory.py,
-                m4_guidance_search.py, m4_payload_sweep.py, m4_trajectory.py,
-                m4_payload_figure.py
-figures/        generated figures (diagnostic/supporting unless noted as validated)
+src/ascent/
+    constants.py        Earth constants, M1-M3 baseline vehicle, M4 study vehicle
+    atmosphere.py        exponential density model
+    propulsion.py        mass-flow / thrust / Tsiolkovsky helpers
+    dynamics.py           planar point-mass ascent ODE + Earth-rotation/relative-wind handling
+    controls.py            gravity-turn guidance law + prescribed thrust-direction profiles
+    simulation.py         solve_ivp wrapper + event handling
+    orbital.py             orbital-element diagnostics + orbit-insertion criteria
+    insertion_search.py    drag-consistent engine-cutoff search
+    loss_budget.py           delta-v / loss accounting
+    inclination.py           direct-ascent launch-azimuth/inclination geometry
 ```
 
-### M5 payload vs. target inclination (current headline result)
+## 4. Dynamics and reference frames
 
-![M5 payload vs inclination](figures/m5_payload_vs_inclination.png)
+- **Planar, point-mass**, Earth-Centered Inertial polar-coordinate state
+  `y = [r, θ, v, γ, m]` — no 6-DOF, no out-of-plane vehicle motion.
+- **Spherical Earth**, exponential atmosphere (ρ₀ = 1.225 kg/m³, scale height 8500 m,
+  vacuum above 100 km).
+- **Launch azimuth** `Az`, clockwise from true north; direct-ascent inclination
+  `cos(i) = cos(lat) · sin(Az)`; useful in-plane rotational boost
+  `v_rot,useful = ω_E · R_E · cos(lat) · sin(Az)`; out-of-plane atmospheric component
+  `v_rot,cross = ω_E · R_E · cos(lat) · cos(Az)`.
+- **Atmosphere-relative wind**: a documented hybrid — the vehicle's own dynamics stay
+  planar (no cross-track velocity state), but drag's relative-wind speed includes the
+  atmosphere's real out-of-plane rotational component for non-due-east azimuths, so drag
+  is not silently understated at high inclination. Exact regression to the M1–M4 formula
+  at due-east (`Az = 90°`) — see [`DESIGN.md` §15.3](DESIGN.md#153-atmosphere-relative-wind-treatment-important-audit-point).
 
-Direct-ascent payload-to-orbit trade for the M4 orbit-capable study vehicle across the
-launch site's full direct-ascent inclination range (28.5°–90°) — see `DESIGN.md` §15.
-28.5° baseline: 10,334 kg; 90° polar: 10,375 kg. The curve is honestly non-monotonic
-(10,141–10,418 kg range) for this vehicle's guidance-search landscape, not a clean
-decline; see `DESIGN.md` §15.11 for the physical interpretation. This is a
-**direct-ascent** trade under the current simplified model — no dogleg, on-orbit plane
-change, or retrograde launch is modeled.
+Full equations, sign conventions, and hand calculations: [`DESIGN.md` §1–§9](DESIGN.md).
 
-### M4 orbit-capable study vehicle — payload capability
+## 5. Verification vehicle (M1–M3)
 
-![M4 payload capability](figures/m4_payload_capability.png)
-
-**This is a different vehicle from the M1–M3 verification vehicle** (higher Isp, 450 s
-vs. 300 s; higher propellant fraction — see `DESIGN.md` §14.3), explicitly labeled the
-"M4 orbit-capable study vehicle." Using a retuned gravity-turn guidance law and a
-standard ascent + idealized-circularization insertion (`DESIGN.md` §14.2), it achieves
-400 km circular orbit for payloads up to **10,333 kg**; the original M1–M3 vehicle
-remains a confirmed failure under the same criterion (`DESIGN.md` §14.9 check A).
-
-![M4 orbit-capable trajectory](figures/m4_orbit_capable_trajectory.png)
-
-### M3 gravity-turn trajectory (unchanged verification vehicle — does not reach orbit)
+The original "Ascent-1" vehicle (Isp = 300 s) exists **only to verify the dynamics,
+guidance law, and integration** — vertical rise → pitch-kick → zero-AoA gravity turn,
+25-case guidance sweep, full event handling and convergence checks. **It does not reach
+400 km circular orbit under any tested guidance** — a known, expected Δv deficit, not a
+bug. It must never be read as an orbit-capable launch vehicle.
 
 ![M3 gravity-turn trajectory](figures/m3_gravity_turn_trajectory.png)
 
-Verified gravity-turn guidance law (vertical rise -> pitch-kick -> zero-AoA turn) on the
-unchanged M1/M2 baseline vehicle, selected from a 25-case parameter sweep by maximum
-burnout specific orbital energy — see `DESIGN.md` §13. **Diagnostic/supporting only,
-not a validated result.** No case in the sweep reaches 400 km circular orbit, which is
-the expected outcome given the Δv deficit documented in `DESIGN.md` §7.4.
+## 6. Orbit-capable M4 study vehicle
 
-### M2 diagnostic trajectory (earlier, prescribed-control-only baseline)
+A **separate, explicitly distinct vehicle** (higher Isp = 450 s, higher propellant
+fraction) introduced specifically for the payload/insertion study — never a retune of
+the M1–M3 vehicle. Insertion criterion: bound, non-Earth-intersecting orbit with apogee
+within 15 km of the 400 km target and an idealized (unconstrained, not deducted from
+vehicle propellant) circularization Δv ≤ 1500 m/s.
 
-![M2 diagnostic trajectory](figures/m2_diagnostic_trajectory.png)
+![M4 orbit-capable trajectory](figures/m4_orbit_capable_trajectory.png)
 
-Fixed near-vertical pitch profile (no guidance law) on the unchanged M1 baseline
-vehicle — see `DESIGN.md` §12.9. Diagnostic/supporting only, kept for comparison
-against the M3 result (`DESIGN.md` §13.7).
+## 7. Payload capability
 
-## Development
+Maximum payload to 400 km / 28.5° at the fixed guidance (kick_start=45 s,
+kick_angle=20°, kick_duration=20 s): **10,333 kg PASS / 10,334 kg FAIL** (1 kg
+bisection tolerance). Reported as **≈10.33 t** — see [`DESIGN.md` §16.6](DESIGN.md#166-m4-reference-payload--recomputation-and-resolution-statement)
+for why more digits than that are not physically meaningful here.
+
+![M4 payload capability](figures/m4_payload_capability.png)
+
+## 8. Delta-v / loss budget
+
+`achieved_dv = ideal_dv_to_cutoff − steering_loss − drag_loss − gravity_loss`, an exact
+algebraic decomposition over the powered-flight interval for this vehicle/guidance/model
+— **not** a universal launch-vehicle Δv budget.
+
+![M4 delta-v loss budget](figures/m4_delta_v_budget.png)
+
+## 9. Direct-ascent inclination study
+
+Guidance is **independently re-optimized per inclination** (not frozen), using the same
+unchanged M4 insertion criterion. Six authoritative inclinations were computed
+(28.5°/35°/45°/55°/70°/90°); connecting lines in the figure are a **visual aid only**,
+not a validated continuous curve — only these six points were actually solved.
+
+![M5 payload vs inclination](figures/m5_payload_vs_inclination.png)
+![M5 rotational assistance](figures/m5_rotational_assistance.png)
+
+**Two different curves, two different natures**:
+- **Useful Earth-rotation assistance** (right-hand figure) is pure geometry and is
+  **strictly monotonically decreasing** with inclination — 408.7 → 0 m/s.
+- **Maximum payload** (left-hand figure) is the output of a bounded local
+  guidance-parameter search and is **not monotonic** — 10,141–10,418 kg across the swept
+  range, with 90° (10,375 kg) actually 0.40% *above* the 28.5° baseline (10,334 kg).
+
+A dedicated M6 sensitivity check (widening the local search from a perturbed seed) found
+an *alternate* local optimum at 35° worth **10,680 kg — 2.5% higher** than the value in
+the authoritative table, which by itself exceeds the entire inter-inclination spread.
+**Conclusion: the payload non-monotonicity is not demonstrated to be a robust orbital-
+mechanics effect — it is, at least in part, a guidance-search-resolution artifact.** The
+28.5°/90° endpoint comparison is trusted; the interior ordering (35°/45°/55°/70°) should
+be read as illustrative of search sensitivity, not as a validated ranking. Full evidence:
+[`DESIGN.md` §16.9](DESIGN.md#169-non-monotonicity--one-focused-sensitivity-check-this-milestone).
+
+This is a **direct-ascent** trade under a simplified model: no dogleg, no on-orbit plane
+change, no retrograde launch. The 90° result is **not** a "plane-change penalty" — no
+plane change is modeled anywhere in this project; it is the direct-ascent consequence of
+reduced launch-site rotational assistance.
+
+## 10. Verification and convergence
+
+- Analytical/unit checks (M1): sign conventions, hand-calculation cross-checks.
+- Trajectory/integration checks (M2–M3): zero-drag limit, ballistic limit, mass-flow
+  consistency, Tsiolkovsky consistency, Earth-rotation check, dimensional/sign checks.
+- Mass-bookkeeping and payload-boundary tests (M4–M5).
+- Inclination-geometry and atmosphere-relative-wind regression tests (M5).
+- Integrator convergence at 28.5°/55°/90° across 3 solver tolerance tiers (M5, reread
+  not rerun in M6 — see [`DESIGN.md` §16.11](DESIGN.md#1611-convergence--final-statement)).
+- CSV reproducibility: independently re-run and diffed in M6 —
+  [`DESIGN.md` §16.2](DESIGN.md#162-independent-csv-reproduction).
+
+**119/119 tests passing** under `pytest -W error`.
+
+## 11. Engineering interpretation
+
+- The early vehicle/model is useful for physics verification but is **not orbit-capable**
+  under the tested control strategy.
+- The separate M4 study vehicle demonstrates **≈10.33 t payload capability** to 400 km /
+  28.5°.
+- Direct-ascent useful Earth-rotation assistance **decreases monotonically** with
+  increasing target inclination — this is deterministic geometry.
+- Maximum payload **does not** decrease monotonically in the computed M5 search.
+- For this model, the payload differences across inclination are small enough (order
+  1–3%) that guidance-search sensitivity (also order 1–2.5%, §9) is comparable to, and
+  in at least one case exceeds, the pure rotational-assistance effect.
+- The 90° direct-ascent case does **not** incur a "plane-change penalty" — the vehicle
+  launches directly into the target plane; no plane change is modeled.
+
+## 12. Limitations
+
+- Planar ascent dynamics — no 6-DOF, no true 3-D launch-site geometry propagation.
+- Hybrid (not fully 3-D) treatment of out-of-plane atmospheric rotation — see §4.
+- Simplified exponential atmosphere, constant drag coefficient.
+- Simplified single-stage propulsion model, no throttling, no staging.
+- Guidance is a bounded local parameter search, not global optimal control — the true
+  optimum at any given inclination is not known, only a lower bound (§9).
+- No winds, no launch corridor / range-safety constraints, no structural/load model
+  beyond the quantities already computed, no dispersions / Monte Carlo.
+- Circularization is an idealized impulsive Δv, not a modeled finite-burn insertion
+  stage, and is not deducted from vehicle propellant.
+- Sparse M5 inclination sampling (6 points); severe computational stiffness was found
+  and fixed near the polar case (§[`DESIGN.md` §15.7](DESIGN.md#157-genuine-bugs-found-and-fixed-near-polar-regime)).
+- Payload results depend on guidance-search quality, quantified but not eliminated in M6
+  (§9).
+
+This is an **engineering portfolio study**, not a flight-performance certification.
+
+## 13. Repository structure
+
+```
+DESIGN.md       mission definition, equations, conventions, hand calcs, verification
+                plan, limitations, full per-milestone implementation notes (M1-M6)
+LICENSE          MIT
+src/ascent/     simulation package (see §3)
+tests/          pytest test suite (119 tests)
+scripts/        m2_diagnostic_trajectory.py, m3_gravity_turn_sweep.py, m3_trajectory.py,
+                m4_guidance_search.py, m4_payload_sweep.py, m4_trajectory.py,
+                m4_payload_figure.py, m5_inclination_sweep.py, m5_finalize_results.py,
+                m5_figures.py, final_portfolio_summary.py
+figures/        generated figures (6 embedded above; 2 additional diagnostics kept for
+                reference — m2_diagnostic_trajectory.png, m3_velocity_components.png)
+```
+
+## 14. Reproduction
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -117,9 +205,22 @@ pip install -e ".[dev]"
 pytest -W error
 ```
 
-## Scope and limitations
+**Fast verification path** (~1 minute; recommended for routine reproduction):
 
-See `DESIGN.md` §10 for the full, explicit list of modeling limitations (point-mass only,
-no 6-DOF, no winds, simplified atmosphere, constant Cd, no structural/load model, no
-throttling, no staging unless later added, no range constraints, no operational
-flight-safety claim).
+```bash
+python scripts/m5_finalize_results.py       # re-verifies all 6 M5 rows independently
+python scripts/final_portfolio_summary.py   # prints the consolidated headline report
+```
+
+**Full regeneration path** (documented, not a quick-start — the M5 sweep in particular
+is computationally expensive near the polar case, see [`DESIGN.md` §16.13](DESIGN.md#1613-reproducibility-path)):
+
+```bash
+python scripts/m3_gravity_turn_sweep.py
+python scripts/m4_payload_sweep.py
+python scripts/m5_inclination_sweep.py
+```
+
+## License
+
+[MIT](LICENSE).

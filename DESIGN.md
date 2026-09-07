@@ -1510,3 +1510,245 @@ non-monotonicity.
 - Retrograde inclinations (>90°) are out of scope (`inclination.azimuth_from_inclination`
   raises `ValueError` for them), as are doglegs, on-orbit plane changes, staging,
   winds, J2, and 6-DOF — all per the task's explicit M5 scope boundary.
+
+---
+
+## 16. Milestone 6 — final validation, sensitivity, and portfolio consolidation
+
+Milestone 6 is a **documentation/audit milestone**: no new trajectory physics, no new
+guidance law, no new inclination points. Its purpose is to independently re-verify every
+committed deterministic output, run one focused sensitivity study on the M5
+non-monotonicity, and consolidate the README into a portfolio landing page. This section
+records what was checked and what was found. `scripts/final_portfolio_summary.py`
+reproduces the headline numbers below on demand, reading only the committed CSVs.
+
+### 16.1 Baseline reconfirmation
+
+At the start of M6: clean working tree, `HEAD = e573c55`, `origin` pointing at
+`github.com/Sanjanakamboj/ascent-trajectory-gravity-turn`, default branch `main`. Full
+suite: **119/119 passing** under `pytest -W error` (unchanged from the M5 checkpoint).
+
+### 16.2 Independent CSV reproduction
+
+All three deterministic CSVs were regenerated from their scripts and diffed against the
+committed files (none of the diffs were kept — investigated, then the original committed
+file was restored via `git checkout` in every case, since no defect was found):
+
+- **`m4_payload_sweep_results.csv`**: regenerated in 26 s. The critical boundary
+  (10,333 kg PASS / 10,334 kg FAIL) reproduced exactly; every other numeric column
+  matched to ~1e-9 relative floating-point noise (platform/BLAS-level, not a logic
+  difference).
+- **`m5_inclination_sweep_results.csv`**: regenerated via `m5_finalize_results.py`
+  (independent re-integration + re-verification of all 6 rows, asserting
+  `meets_insertion_criterion` for each) in 30 s. **Byte-for-byte identical** to the
+  committed file.
+- **`m3_sweep_results.csv`**: regenerated and found a small, fully explained,
+  diagnostic-only discrepancy — see §16.3.
+
+### 16.3 A genuine (but harmless) M3 diagnostic discrepancy, investigated
+
+Regenerating `m3_sweep_results.csv` did **not** reproduce it exactly: for the subset of
+cases that end in ground impact (`intersects_earth = True`, `reached_burnout = False`),
+`max_dynamic_pressure_kPa` shifted by up to ~0.02% relative (e.g. 1256.545 → 1256.618
+kPa for kick_start=20°, kick_angle=5°). Every other reported quantity for those same
+rows — `max_altitude_reached_km`, and by extension every downstream column — was
+**bit-identical**, and every case that reaches burnout (`reached_burnout = True`)
+reproduced completely unchanged.
+
+Root cause: the M5 fix that added a 1 m `GROUND_EVENT_DEADBAND` to the ground-impact
+event (§15.7, item 3) makes the solver stop these already-failing, ground-impact
+trajectories about 1 m of altitude earlier than before M5. `max_dynamic_pressure_kPa`
+is computed by scanning the solver's output samples near the ground (where q peaks for
+a case that never gets far off the pad), so a ~1 m shift in exactly where integration
+stops perturbs which sample is reported as the max by a few hundredths of a percent.
+This is an expected, negligible side effect of a real, already-documented M1–M4-safe
+bug fix (the deadband only matters within 1 m of the ground) — not a new defect, and it
+changes no pass/fail conclusion anywhere in M1–M5. The committed CSV was restored
+unchanged rather than "fixed" or regenerated, per the instruction to preserve existing
+outputs absent an actual defect.
+
+### 16.4 Dynamics/convention and atmosphere-relative-wind re-audit
+
+Reread `dynamics.relative_speed`, `controls.gravity_turn_control`, and `inclination.py`
+against DESIGN.md §1.4, §15.2, and §15.3. Confirmed:
+- Launch azimuth is clockwise-from-north throughout code, tests, and docs, with no
+  inconsistent convention found.
+- `cos(i) = cos(lat) * sin(Az)` is the sole inclination relation in code (`inclination.py`)
+  and text (§15.2); no other formula appears anywhere in the repo.
+- At `azimuth_rad = 90°` (default, due east), `cos(Az)` evaluates to a ~6e-17 floating
+  point residual rather than exact 0 (a `numpy`/IEEE-754 artifact of representing π/2),
+  so the "new" cross-track drag term is not literally identically zero for M1–M4 calls —
+  it is ~14 orders of magnitude below the in-plane term, i.e. exact regression in every
+  practical sense (confirmed: the full 81-case M1–M4 regression suite still passes
+  unchanged). No double-counting of rotation was found: the vehicle's own state carries
+  no cross-track velocity component anywhere; the cross-track term enters only the
+  drag-relative-wind calculation, exactly as documented.
+- Drag-near-zero-velocity handling (`v < V_FLOOR → a_drag = 0`) and the guidance
+  deadlock-breaking branch were re-read and confirmed inert for every M1–M4 case (all of
+  which have `v0` in the hundreds of m/s, far above `V_FLOOR = 1.0`).
+
+### 16.5 M4 vehicle vs. M1–M3 vehicle distinction
+
+Re-scanned figure titles/captions, README, and DESIGN.md for ambiguity between the two
+vehicles. Every M4/M5 figure caption and every occurrence in the README explicitly says
+"M4 orbit-capable study vehicle" and separately labels the M1–M3 vehicle as the
+"verification vehicle" that "does not reach orbit" — no instance found where the two
+are conflated. The README was further tightened in this milestone (§17 below) to state
+the distinction once, prominently, near the top, rather than only in per-figure captions.
+
+### 16.6 M4 reference payload — recomputation and resolution statement
+
+Recomputed in §16.2. Headline: **maximum passing payload ≈ 10,333 kg**, first failing
+payload 10,334 kg, at the fixed guidance (kick_start=45 s, kick_angle=20°,
+kick_duration=20 s) and the unchanged M4 insertion criterion (bound orbit,
+non-Earth-intersecting, apogee within 15 km of the 400 km target, idealized
+circularization Δv ≤ 1500 m/s). Achieved apogee at the boundary: 399.89 km;
+circularization Δv: 96.8 m/s.
+
+**Resolution statement**: the bisection tolerance used to locate this boundary is 1 kg
+(`m4_payload_sweep.py: BISECTION_TOLERANCE = 1.0`), but the PASS/FAIL transition itself
+is a near-step function of payload (through the drag-consistent cutoff search), not a
+smooth one, so 1 kg is the resolution of *this* boundary search — it is not a claim that
+the true vehicle capability is known to ±1 kg physically. The project reports this as
+**"maximum payload ≈ 10.33 t"**, i.e. to 3 significant figures, which is the
+appropriate precision given the guidance is fixed (not re-optimized per payload) and the
+model's other simplifications (§10, §14.10, §15.14). Reporting "10,333 kg" to the exact
+kg in the CSV is a record of the search output, not a claim of physical precision.
+
+### 16.7 Δv / loss-budget re-audit
+
+Re-read `loss_budget.compute_delta_v_budget` and DESIGN.md §14.6/§14.8. Confirmed the
+decomposition `achieved_dv = ideal_dv_to_cutoff - steering_loss - drag_loss -
+gravity_loss` is an exact algebraic identity evaluated over the same powered-flight
+interval (liftoff → drag-consistent cutoff) for one vehicle/guidance/model
+configuration — not a general launch-vehicle Δv budget, and not additive across
+different cutoff times or different vehicles. No accounting residual beyond ordinary
+floating-point roundoff was found (see the existing `test_m4_loss_budget.py` suite,
+including the `mu=0.0` fix already applied in M5 to keep the zero-drag/zero-alpha
+Tsiolkovsky cross-check internally consistent).
+
+### 16.8 M5 inclination table — final re-audit
+
+All 6 authoritative rows re-verified in §16.2 (byte-identical). Confirmed once more,
+directly from the reproduced CSV:
+- `useful_rotational_boost_ms` is strictly monotonically decreasing with inclination
+  (408.7 → 381.0 → 328.9 → 266.8 → 159.1 → ~0 m/s) — pure geometry, confirmed by
+  `test_inclination.py`.
+- `max_payload_kg` is **not** monotonic: 10,334 / 10,418 / 10,327 / 10,141 / 10,258 /
+  10,375 kg at 28.5/35/45/55/70/90°. Range **10,141–10,418 kg**. 90° (10,375 kg) is
+  **41 kg (0.40%) higher** than the 28.5° baseline (10,334 kg), not lower — there is no
+  net "penalty" between the two domain endpoints for this vehicle/search.
+
+### 16.9 Non-monotonicity — one focused sensitivity check (this milestone)
+
+Per the task's explicit instruction, one additional, focused robustness check was run
+using **only the existing `m5_inclination_sweep.py` search machinery** (no new guidance
+law, no new search algorithm) — comparing the committed local-optimum guidance at two
+representative non-endpoint inclinations against a **second** local optimum found from a
+deliberately perturbed seed with a wider search span:
+
+| Inclination | Committed guidance → boundary | Alternate local optimum → boundary | Difference |
+|---|---|---|---|
+| 35° | (45, 22°, 20 s) → ~10,418 kg | (45, 20°, 19 s) → ~10,680 kg | **+262 kg (+2.5%)** |
+| 55° | (46, 30°, 18 s) → ~10,141 kg | (48, 35°, 19 s) → ~10,072 kg | −69 kg (−0.7%) |
+
+(Boundaries computed with a relaxed 10 kg bisection tolerance for speed — sufficient to
+compare magnitudes, not a replacement for the 1 kg-tolerance authoritative table.)
+
+**Finding, reported honestly**: at 35°, a modest widening of the local guidance search
+finds an *even better* local optimum (~10,680 kg) than the one used in the authoritative
+table (10,418 kg) — a 2.5% difference that by itself **exceeds the entire 2.7% spread**
+across all six inclinations in §16.8. At 55° the alternate optimum is close to the
+committed one (0.7% difference), consistent with a flatter local landscape there.
+
+**Conclusion**: the M5 payload-vs-inclination non-monotonicity is **not demonstrated to
+be a robust physical trend**. It is, at minimum, **strongly confounded with — and at 35°
+apparently dominated by — local-guidance-optimum sensitivity** of the same order as (or
+larger than) the inter-inclination spread itself. The deterministic geometry (rotational
+assistance) is monotonic and robust; the searched payload curve is not, and this
+milestone's evidence points to search-landscape ruggedness (multiple local optima of
+materially different quality reachable from nearby seeds), not a discovered orbital-
+mechanics effect, as the dominant explanation for the non-monotonicity. This does **not**
+change the 28.5° or 90° headline numbers (both independently reproduced exactly), and it
+does not overturn the qualitative M4→M5 conclusions — it tightens exactly one claim: the
+mid-range ordering (35/45/55/70°) should be read as illustrative of search sensitivity,
+not as a validated ranking.
+
+### 16.10 Payload-search resolution / uncertainty (final statement)
+
+Combining §16.6 and §16.9: **maximum payload at a fixed inclination is resolved to
+about ±1–10 kg by the bisection procedure itself, but the guidance-search procedure
+that selects the operating point ahead of that bisection carries a materially larger
+uncertainty — order 1–2.5% (roughly 70–260 kg) at the mid-range inclinations** — because
+the local search is not guaranteed to find the guidance-parameter global optimum. The
+28.5° and 90° endpoints are better anchored (28.5° reuses the independently-optimized M4
+guidance; 90° was solved by exhaustive manual search near a severe numerical
+singularity, not a coarse automatic grid), so the endpoint comparison (10,334 kg vs.
+10,375 kg) is trusted at face value; the interior ordering is not.
+
+### 16.11 Convergence — final statement
+
+The existing 28.5°/55°/90° convergence evidence (§15.12, `test_m5_convergence.py`) was
+reread rather than re-run in full (no new evidence was needed): tightest two solver
+tiers agree to <10 m in radius, <0.1 m/s in speed, <6e-4° in flight-path angle, and
+<10 g in mass at all three inclinations, including the numerically stiff 90° case. This
+is sufficient evidence that the trajectories themselves are well-converged; §16.9's
+finding is about guidance-*search* resolution, a distinct axis from integrator
+convergence, and is not in tension with this result.
+
+### 16.12 Figure audit and final set
+
+Reviewed all 8 committed figures. The final README retains 6:
+`m3_gravity_turn_trajectory.png`, `m4_orbit_capable_trajectory.png`,
+`m4_payload_capability.png`, `m4_delta_v_budget.png`, `m5_payload_vs_inclination.png`,
+`m5_rotational_assistance.png`. `m2_diagnostic_trajectory.png` and
+`m3_velocity_components.png` remain in `figures/` and are described in this document,
+but are no longer embedded in the README landing page, per the instruction not to embed
+every diagnostic plot. No figure's underlying numerical data was altered for this
+milestone — only captions/README placement were reviewed for clarity and for the
+"verification vehicle" vs. "M4 study vehicle" and "non-monotonic, not a plane-change"
+labeling required by §16.5/§16.9.
+
+### 16.13 Reproducibility path
+
+Two documented reproduction paths (README §"Reproduction"):
+- **Fast path** (~1 minute): rerun `pytest -W error`, then
+  `python scripts/m5_finalize_results.py` (re-verifies all 6 authoritative M5 rows
+  independently against the committed CSV) and `python scripts/final_portfolio_summary.py`.
+- **Full path** (documented, not recommended for routine use): rerun
+  `scripts/m3_gravity_turn_sweep.py`, `scripts/m4_payload_sweep.py`, and
+  `scripts/m5_inclination_sweep.py` from scratch. The last of these is the one flagged
+  as expensive — the 90° case alone required a manual, non-automatic search during
+  original development (§15.6) because of severe near-polar numerical stiffness
+  (§15.7); a full from-scratch automatic rerun of that specific case is not a
+  "quick-start" operation and is not required to verify the project's claims (the fast
+  path above suffices, since `m5_finalize_results.py` independently re-integrates and
+  re-checks the insertion criterion for the committed guidance rather than re-deriving
+  it).
+
+### 16.14 Public-release hygiene
+
+Scanned all 57 tracked files: no credentials, API keys, tokens, `/Users/...` absolute
+paths, usernames, `.venv`/cache/`.DS_Store`/editor-temp files, or abandoned debug
+scripts found tracked. Nothing was removed because nothing improper was found.
+
+### 16.15 License
+
+No `LICENSE` file existed prior to M6, despite `pyproject.toml` declaring
+`license = { text = "MIT" }` — an unbacked metadata claim. Per the explicit instruction
+to stop and ask before assuming a license, this was raised with the user; **MIT** was
+selected (matching the pre-existing, now-backed, `pyproject.toml` metadata). A
+`LICENSE` file was added and the README updated with a license note.
+
+### 16.16 M6 limitations (in addition to §10/§14.10/§15.14, not a replacement for them)
+
+- The M6 sensitivity check (§16.9) covered only 2 of the 6 inclinations and one
+  perturbation each — it is evidence that the local search is under-resolved at 35°
+  specifically, not an exhaustive characterization of the whole guidance landscape.
+- No global guidance optimizer was introduced in M6 (out of scope by explicit
+  instruction) — so the "true" optimum at any inclination remains unknown; only a lower
+  bound (the best of several found local optima) is available.
+- This remains an engineering **portfolio study** on a simplified point-mass, planar,
+  idealized-circularization model with a local, non-exhaustive guidance search — not a
+  flight-performance certification, and the mid-range inclination payload ordering
+  specifically should be read as illustrative rather than validated (§16.9/§16.10).
